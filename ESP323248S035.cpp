@@ -1,5 +1,7 @@
 #include "ESP323248S035.h"
 
+#include "debug.h"
+
 // THROTTLE invokes <fn> if and only if <per> milliseconds have elapsed since
 // the last time <fn> was invoked from this macro (or if it is being invoked for
 // the first time).
@@ -24,12 +26,12 @@
     }                                  \
   }
 
-lv_disp_t          *TFT_SPI::_disp;
-lv_disp_drv_t       TFT_SPI::_ddrv;
-lv_disp_draw_buf_t  TFT_SPI::_draw;
-lv_color_t          TFT_SPI::_fb[TFT_SPI::_tft_width * 10];
-lv_indev_t         *TFT_SPI::_inpt;
-lv_indev_drv_t      TFT_SPI::_idrv;
+lv_disp_t          *TPC_LCD::_disp;
+lv_disp_drv_t       TPC_LCD::_ddrv;
+lv_disp_draw_buf_t  TPC_LCD::_draw;
+lv_color_t          TPC_LCD::_fb[TPC_LCD::_tft_width * 10];
+lv_indev_t         *TPC_LCD::_inpt;
+lv_indev_drv_t      TPC_LCD::_idrv;
 
 ESP323248S035C hmi;
 
@@ -37,22 +39,24 @@ ESP323248S035C hmi;
 static void c_log(const char *buf) { swritef(Serial, "%s", buf); }
 #endif
 
-void c_tick() { lv_tick_inc(TFT_SPI::refresh()); }
+void c_tick() { lv_tick_inc(TPC_LCD::refresh()); }
 
 void c_flush(lv_disp_drv_t *drv, const lv_area_t *area, lv_color_t *color) {
-  hmi.tft.flush(drv, area, color);
+  hmi.lcd.flush(drv, area, color);
 }
 
 void c_read(lv_indev_drv_t *drv, lv_indev_data_t *data) {
-  hmi.tpc.read(drv, data);
+  hmi.lcd.read(drv, data);
 }
 
-bool TFT_SPI::init() {
+bool TPC_LCD::init() {
 #if (LV_USE_LOG)
   lv_log_register_print_cb(c_log);
 #endif
+
   lv_init();
-  begin(_pin_sck, _pin_sdi, _pin_sdo); // SPIClass
+  SPIClass::begin(_pin_sck, _pin_sdi, _pin_sdo);
+
 
   pinMode(_pin_sdc, OUTPUT); // D/C
   pinMode(_pin_sel, OUTPUT); // CS
@@ -63,24 +67,22 @@ bool TFT_SPI::init() {
   ledcAttachPin(_pin_blt, _pwm_blt_chan);
 
   // ST7796 initialization sequence
-  command(cmd_t::swreset);
+  tx(cmd_t::swreset);
   delay(100);
-  command(cmd_t::cscon, 0xC3); // Enable extension command 2 part I
-  command(cmd_t::cscon, 0x96); // Enable extension command 2 part II
-  command(cmd_t::colmod, _tft_colors); // 16 bits R5G6B5
-  command(cmd_t::madctl, _tft_rotate | _tft_subord);
-  command(cmd_t::pgc, 0xF0, 0x09, 0x0B, 0x06, 0x04, 0x15, 0x2F, 0x54, 0x42, 0x3C, 0x17, 0x14, 0x18, 0x1B);
-  command(cmd_t::ngc, 0xE0, 0x09, 0x0B, 0x06, 0x04, 0x03, 0x2B, 0x43, 0x42, 0x3B, 0x16, 0x14, 0x17, 0x1B);
-  command(cmd_t::cscon, 0x3C); // Disable extension command 2 part I
-  command(cmd_t::cscon, 0x69); // Disable extension command 2 part II
-  command(cmd_t::invoff); // Inversion off
-  command(cmd_t::noron);  // Normal display on
-  command(cmd_t::slpout); // Out of sleep mode
-  command(cmd_t::dispon); // Main screen turn on
+  tx(cmd_t::cscon, 0xC3); // Enable extension command 2 part I
+  tx(cmd_t::cscon, 0x96); // Enable extension command 2 part II
+  tx(cmd_t::colmod, _tft_depth); // 16 bits R5G6B5
+  tx(cmd_t::madctl, _tft_aspect | _tft_subpixel);
+  tx(cmd_t::pgc, 0xF0, 0x09, 0x0B, 0x06, 0x04, 0x15, 0x2F, 0x54, 0x42, 0x3C, 0x17, 0x14, 0x18, 0x1B);
+  tx(cmd_t::ngc, 0xE0, 0x09, 0x0B, 0x06, 0x04, 0x03, 0x2B, 0x43, 0x42, 0x3B, 0x16, 0x14, 0x17, 0x1B);
+  tx(cmd_t::cscon, 0x3C); // Disable extension command 2 part I
+  tx(cmd_t::cscon, 0x69); // Disable extension command 2 part II
+  tx(cmd_t::invoff); // Inversion off
+  tx(cmd_t::noron);  // Normal display on
+  tx(cmd_t::slpout); // Out of sleep mode
+  tx(cmd_t::dispon); // Main screen turn on
 
   set_backlight(_pwm_blt_hres);
-
-  _tick.attach_ms(_tft_refresh, c_tick);
 
   lv_disp_draw_buf_init(&_draw, _fb, NULL, _tft_width * 10);
   lv_disp_drv_init(&_ddrv);
@@ -92,125 +94,60 @@ bool TFT_SPI::init() {
 
   lv_obj_clean(lv_scr_act());
 
-  // TODO: calibrate touch
-  hmi.tpc.init();
+  // TODO: calibrate touch?
+  bool ok = false;
+  if (TwoWire::begin(_pin_sda, _pin_scl)) {
+    static uint8_t pid[_size_prod_id];
+    if ((ok = rx(_reg_prod_id, pid, sizeof(pid)))) {
+      swritef(Serial, "TPC_I2C: device ID = %u");
+    }
+  }
 
   lv_indev_drv_init(&_idrv);
   _idrv.type = LV_INDEV_TYPE_POINTER;
   _idrv.read_cb = c_read;
   _inpt = lv_indev_drv_register(&_idrv);
 
-  return true;
+  _tick.attach_ms(_tft_refresh, c_tick);
+
+  return ok;
 }
 
-void TFT_SPI::flush(lv_disp_drv_t *drv, const lv_area_t *area, lv_color_t *color) {
-  command(cmd_t::caset,
+void TPC_LCD::flush(lv_disp_drv_t *drv, const lv_area_t *area, lv_color_t *color) {
+  tx(cmd_t::caset,
     static_cast<uint8_t>(area->x1 >> 8),
     static_cast<uint8_t>(area->x1),
     static_cast<uint8_t>(area->x2 >> 8),
     static_cast<uint8_t>(area->x2));
-  command(cmd_t::raset,
+  tx(cmd_t::raset,
     static_cast<uint8_t>(area->y1 >> 8),
     static_cast<uint8_t>(area->y1),
     static_cast<uint8_t>(area->y2 >> 8),
     static_cast<uint8_t>(area->y2));
-  pixels(cmd_t::ramwr,
-    color, lv_area_get_width(area) * lv_area_get_height(area));
+  px(cmd_t::ramwr, color, lv_area_get_width(area) * lv_area_get_height(area));
   lv_disp_flush_ready(drv);
 }
 
-void TFT_SPI::pixels(cmd_t const code, const lv_color_t color[], size_t const count) {
-  digitalWrite(_pin_sdc, LOW); // D/C ⇒ command
-  beginTransaction(SPISettings(_bus_freq, _word_ord, _sig_mode));
-  digitalWrite(_pin_sel, LOW); // C/S ⇒ enable
-  write(static_cast<uint8_t>(code));
-  if (count > 0) {
-    digitalWrite(_pin_sdc, HIGH); // D/C ⇒ data
-    writePixels(color, count * sizeof(lv_color_t));
-  }
-  digitalWrite(_pin_sel, HIGH); // C/S ⇒ disable
-  endTransaction();
-}
-
-bool TPC_I2C::init() {
-  bool ok = false;
-  if (begin(_pin_sda, _pin_scl)) {
-    static uint8_t pid[_size_pid];
-    if ((ok = read(_reg_pid1, pid, sizeof(pid)))) {
-      swritef(Serial, "TPC_I2C: device ID = %u");
-    }
-  }
-  return ok;
-}
-
-size_t TPC_I2C::count() {
-  static uint8_t stat[1] = { 0 };
-  size_t count = 0;
-  if (read(_reg_stat, stat, sizeof(stat))) {
-    count = stat[0];
-  }
-  memset(stat, 0, sizeof(stat));
-  if (((count & 0x80) > 0) && ((count & 0x0F) < _touch_max)) {
-    write(_reg_stat, stat, sizeof(stat));
-    count &= 0x0F;
-  }
-  return count;
-}
-
-bool TPC_I2C::get(point * const pt, size_t count) {
-  bool ok = read(_reg_tid1, pt, sizeof(point) * count);
-  if (ok) {
-    uint16_t swap;
-    switch ((int)hmi.tft.rotation()) {
-      case 0:
-        for (uint8_t i = 0; i < count; ++i) {
-          pt[i].x = hmi.tft.width() - pt[i].x;
-          pt[i].y = hmi.tft.height() - pt[i].y;
-        }
-        break;
-      case 90:
-        for (uint8_t i = 0; i < count; ++i) {
-          swap = pt[i].x;
-          pt[i].x = pt[i].y;
-          pt[i].y = hmi.tft.height() - swap;
-        }
-        break;
-      case 180:
-        for (uint8_t i = 0; i < count; ++i) {
-          pt[i].x = pt[i].x;
-          pt[i].y = pt[i].y;
-        }
-        break;
-      case 270:
-        for (uint8_t i = 0; i < count; ++i) {
-          swap = pt[i].x;
-          pt[i].x = hmi.tft.width() - pt[i].y;
-          pt[i].y = swap;
-        }
-        break;
-    }
-  }
-  return ok;
-}
-
-void TPC_I2C::read(lv_indev_drv_t *drv, lv_indev_data_t *data) {
+void TPC_LCD::read(lv_indev_drv_t *drv, lv_indev_data_t *data) {
   static int16_t _x = 0, _y = 0;
-  auto n = count();
-  if (n == 1) {
-    swritef(Serial, "touches detected: %d", n);
-    point pt;
-    if (get(&pt, 1)) {
+  point_t pt;
+  switch (touch_count()) {
+  case 1:
+    if (map(&pt, 1)) {
       swritef(Serial, "touch: (%d,%d)", pt.x, pt.y);
       data->state = LV_INDEV_STATE_PR;
       _x = data->point.x = pt.x;
       _y = data->point.y = pt.y;
     }
-  } else {
+    break;
+  default:
     data->point.x = _x;
     data->point.y = _y;
     data->state = LV_INDEV_STATE_REL;
+    break;
   }
 }
+
 bool RGB_PWM::init() {
   // Red
   pinMode(_pin_r, OUTPUT);
@@ -274,8 +211,7 @@ bool ESP323248S035C::init() {
     rgb.init() &&
     amp.init() &&
     cds.init() &&
-    tft.init() &&
-    tpc.init() &&
+    lcd.init() &&
     sdc.init() ;
 }
 

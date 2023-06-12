@@ -7,23 +7,30 @@
 #include <Wire.h>
 #include <lvgl.h>
 
+#include <stdint.h>
+
 typedef unsigned long msec_t;
 typedef int8_t        gpin_t;
 
-template<typename... Args>
-size_t swritef(Stream &out, const char * fmt, Args... args) {
-  static constexpr char eol[] = "\r\n";
-  // Cannot rely on the target implementation of Stream to provide printf
-  size_t size = snprintf(nullptr, 0, fmt, args...);
-  std::string str;
-  str.reserve(size + 1);
-  str.resize(size);
-  snprintf(&str[0], size + 1, fmt, args...);
-  return out.write(str.c_str(), size) + out.write(eol);
-}
-
-class TFT_SPI: public SPIClass { // ST7796 3.5" 320x480 TFT LCD
+class TPC_LCD: public SPIClass, public TwoWire {
 protected:
+  struct __attribute__((packed)) point_t {
+    // attributes of an individual touch event, this structure is repeated
+    // contiguously in the following memory-mapped registers, which implements
+    // 5-point multi-touch tracking (in the hardware).
+    // however, the LCD graphics library (lvgl or TFT_eSPI/LoyvanGFX) currently
+    // supports single-touch only.
+    //   1. 0x814F—0x8156
+    //   2. 0x8157—0x815E
+    //   3. 0x815F—0x8166
+    //   4. 0x8167—0x816E
+    //   5. 0x816F—0x8176
+    uint8_t track;
+    uint16_t x;
+    uint16_t y;
+    uint16_t area;
+    uint8_t _u8[1];
+  };
   enum class cmd_t: uint8_t {
     swreset = 0x01, // Software Reset
     slpin   = 0x10, // Sleep in
@@ -48,6 +55,14 @@ protected:
     bgr     = 0x08, // Subpixel rendering: BGR order
     mh      = 0x10, // Horizontal Refresh Order
     rgb     = 0x00, // Subpixel rendering: RGB order
+    // MADCTL rotation bitmasks
+    // We can conveniently translate these bitmasks to unique values 0..3, andddd
+    // preserve the ordering for computing degrees of rotation, as follows:
+    //    enum: ((mask >> 5) & 3)          degrees: enum * 90
+    tall          = my,           // ((128 >> 5) & 3) * 90 == 0 * 90 =   0°
+    wide          = mv,           //  ((32 >> 5) & 3) * 90 == 1 * 90 =  90°
+    tall_inverted = mx,           //  ((64 >> 5) & 3) * 90 == 2 * 90 = 180°
+    wide_inverted = my | mv | mx, // ((224 >> 5) & 3) * 90 == 3 * 90 = 270°
   };
   enum class colmod_t: uint8_t {
     rgb16   = 0x50,
@@ -55,91 +70,52 @@ protected:
     rgb656  = rgb16 | ctrl16,
   };
 
-public:
-  class rotate_t {
-  public:
-    enum orientation_t: int {
-      invalid = 0,
-      portrait,
-      landscape,
-      portrait_flip,
-      landscape_flip,
-      count,
-    };
-    rotate_t() = default;
-    constexpr rotate_t(int d): _orientation(
-      d == _int[portrait]       ? portrait : (
-      d == _int[landscape]      ? landscape : (
-      d == _int[portrait_flip]  ? portrait_flip : (
-      d == _int[landscape_flip] ? landscape_flip : (
-      invalid))))
-    ) {}
-    constexpr rotate_t(orientation_t o): _orientation(o) {}
-    constexpr operator orientation_t() const { return _orientation; }
-    constexpr operator bool() const {
-      return invalid < _orientation && _orientation < count;
-    }
-    constexpr operator int() const {
-      return *this ? _int[_orientation] : _int[invalid];
-    }
-    constexpr operator madctl_t() const {
-      return *this ? _madctl_t[_orientation] : _madctl_t[invalid];
-    }
-    constexpr bool wide_aspect() { return (int)*this % 180 != 0; }
-  private:
-    // rotation angle (degrees)
-    static constexpr int _int[] = { 360, 0, 90, 180, 270, };
-    // MADCTL bitmasks for screen rotation
-    static constexpr madctl_t _madctl_t[] = {
-      static_cast<madctl_t>(0x00), // invalid
-      madctl_t::my,                // portrait
-      madctl_t::mv,                // landscape
-      madctl_t::mx,                // portrait_flip
-      static_cast<madctl_t>(       // landscape_flip
-        static_cast<uint8_t>(madctl_t::my) |
-        static_cast<uint8_t>(madctl_t::mv) |
-        static_cast<uint8_t>(madctl_t::mx)),
-    };
-    orientation_t _orientation;
-  };
-
-protected:
   // GPIO pins
-  static gpin_t const _pin_sdi = 12U; // MISO
-  static gpin_t const _pin_sdo = 13U; // MOSI
-  static gpin_t const _pin_sck = 14U; // SCLK
-  static gpin_t const _pin_sel = 15U; // SS/CS
-  static gpin_t const _pin_sdc =  2U; // DC/RS
-  static gpin_t const _pin_blt = 27U; // delicious
-
-  // SPI line discipline
-  static uint32_t const _bus_freq = 80000000U; // 80 MHz
-  static uint8_t  const _word_ord = SPI_MSBFIRST;
-  static uint8_t  const _sig_mode = SPI_MODE0;
-
+  static gpin_t   constexpr _pin_sdi        = 12U; // SPI MISO
+  static gpin_t   constexpr _pin_sdo        = 13U; // SPI MOSI
+  static gpin_t   constexpr _pin_sck        = 14U; // SPI SCLK
+  static gpin_t   constexpr _pin_sel        = 15U; // SPI SS/CS
+  static gpin_t   constexpr _pin_sdc        =  2U; // LCD DC/RS
+  static gpin_t   constexpr _pin_blt        = 27U; // delicious BLT
+  static gpin_t   constexpr _pin_scl        = 32U; // I²C SCL
+  static gpin_t   constexpr _pin_sda        = 33U; // I²C SDA
+  static gpin_t   constexpr _pin_int        = 21U; // TPC INT
+  static gpin_t   constexpr _pin_rst        = 25U; // TPC RST
+  // SPI interfaces
+  static uint8_t  constexpr _spi_bus        = 2U;   // HSPI
+  static uint32_t constexpr _bus_freq       = 80000000U; // 80 MHz
+  static uint8_t  constexpr _word_ord       = SPI_MSBFIRST;
+  static uint8_t  constexpr _sig_mode       = SPI_MODE0;
+  // I²C interfaces
+  static uint8_t  constexpr _i2c_bus        = 1U;   // Wire1
+  static uint8_t  constexpr _dev_addr       = 0x5D; // I²C touch device address
   // Backlight PWM
-  static uint8_t  const _pwm_blt_chan = 12U;
-  static uint32_t const _pwm_blt_freq = 5000U; // 5 kHz
-  static uint8_t  const _pwm_blt_bits = 8U;
-  static uint8_t  const _pwm_blt_hres = (1U << _pwm_blt_bits) - 1U;
-
+  static uint8_t  constexpr _pwm_blt_chan   = 12U;
+  static uint32_t constexpr _pwm_blt_freq   = 5000U; // 5 kHz
+  static uint8_t  constexpr _pwm_blt_bits   = 8U;
+  static uint8_t  constexpr _pwm_blt_hres   = (1U << _pwm_blt_bits) - 1U;
   // TFT configuration
-  static msec_t   const _tft_refresh =  10U;
-  static uint16_t const _tft_width   = 320U; // Use methods width() and height()
-  static uint16_t const _tft_height  = 480U; //  to account for rotation.
-
-  static uint8_t  const _tft_colors = (uint8_t)colmod_t::rgb656;
-  static uint8_t  const _tft_subord = (uint8_t)madctl_t::rgb;
-  static int      const _tft_rotate = 90; // landscape
+  static msec_t   constexpr _tft_refresh    =  10U; // milliseconds
+  static uint16_t constexpr _tft_width      = 320U; // Use width() and height()
+  static uint16_t constexpr _tft_height     = 480U; //  to account for rotation.
+  static uint8_t  constexpr _tft_depth      = static_cast<uint8_t>(colmod_t::rgb656);
+  static uint8_t  constexpr _tft_subpixel   = static_cast<uint8_t>(madctl_t::rgb);
+  static uint8_t  constexpr _tft_aspect     = static_cast<uint8_t>(madctl_t::wide_inverted);
+  // Touch MMIO
+  static uint16_t constexpr _reg_prod_id    = 0x8140; // product ID (byte 1/4)
+  static size_t   constexpr _size_prod_id   = 4U;     // bytes
+  static uint16_t constexpr _reg_stat       = 0x814E; // buffer/track status
+  static uint16_t constexpr _reg_base_point = 0x814F;
+  static size_t   constexpr _touch_max      = 5U; // simultaneous touch points
 
   template <class ...E>
-  void command(cmd_t const code, E ...e) {
+  void tx(cmd_t const code, E ...e) {
     constexpr size_t size = sizeof...(e);
     uint8_t data[size] = { static_cast<uint8_t>(e)... };
     digitalWrite(_pin_sdc, LOW); // D/C ⇒ command
     beginTransaction(SPISettings(_bus_freq, _word_ord, _sig_mode));
     digitalWrite(_pin_sel, LOW); // C/S ⇒ enable
-    write((uint8_t)code);
+    SPIClass::write(static_cast<uint8_t>(code));
     if (size > 0) {
       digitalWrite(_pin_sdc, HIGH); // D/C ⇒ data
       writeBytes(data, size);
@@ -148,7 +124,105 @@ protected:
     endTransaction();
   }
 
-  void pixels(cmd_t const code, const lv_color_t color[], size_t const count);
+  void px(cmd_t const code, const lv_color_t color[], size_t const count) {
+    digitalWrite(_pin_sdc, LOW); // D/C ⇒ command
+    beginTransaction(SPISettings(_bus_freq, _word_ord, _sig_mode));
+    digitalWrite(_pin_sel, LOW); // C/S ⇒ enable
+    SPIClass::write(static_cast<uint8_t>(code));
+    if (count > 0) {
+      digitalWrite(_pin_sdc, HIGH); // D/C ⇒ data
+      writePixels(color, count * sizeof(lv_color_t));
+    }
+    digitalWrite(_pin_sel, HIGH); // C/S ⇒ disable
+    endTransaction();
+  }
+
+  inline bool r16(uint16_t const reg) {
+    beginTransmission(_dev_addr);
+    return TwoWire::write(static_cast<uint8_t>(reg >> 8)) && // MSB (first)
+      TwoWire::write(static_cast<uint8_t>(reg & 0xFF));      // LSB
+  }
+
+  inline bool tx(uint16_t const reg, uint8_t * const buf, size_t const len) {
+    size_t sent = 0U;
+    if (r16(reg)) {
+      sent = TwoWire::write(buf, len);
+    }
+    endTransmission();
+    return sent == len;
+  }
+
+  inline bool rx(uint16_t const reg, uint8_t * const buf, size_t const len) {
+    uint8_t *dst = buf;
+    size_t rem = 0U;
+    bool ok = r16(reg);
+    endTransmission(false);
+    if (ok && (len == (rem = requestFrom(_dev_addr, len)))) {
+      while (available() && rem--) {
+        *(dst++) = TwoWire::read();
+      }
+    }
+    return rem == 0 && dst != buf;
+  }
+
+  inline bool rx(uint16_t const reg, point_t * const buf, size_t const len) {
+    return rx(reg, (uint8_t *)buf, len);
+  }
+
+  template <unsigned N = 0>
+  static inline constexpr uint16_t track() {
+    return _reg_base_point + N * sizeof(point_t) + offsetof(point_t, track);
+  }
+
+  template<uint16_t R = _tft_aspect>
+  inline bool map(point_t * const pt, size_t count) {
+    bool ok = rx(_reg_base_point, pt, sizeof(point_t) * count);
+    ((std::function<void()>[]){
+      [pt, count]() {
+        for (uint8_t i = 0; i < count; ++i) {
+          pt[i].x = width() - pt[i].x;
+          pt[i].y = height() - pt[i].y;
+        }
+      },
+      [pt, count]() {
+        uint16_t swap;
+        for (uint8_t i = 0; i < count; ++i) {
+          swap = pt[i].x;
+          pt[i].x = pt[i].y;
+          pt[i].y = height() - swap;
+        }
+      },
+      [pt, count]() {
+        for (uint8_t i = 0; i < count; ++i) {
+          pt[i].x = pt[i].x;
+          pt[i].y = pt[i].y;
+        }
+      },
+      [pt, count]() {
+        uint16_t swap;
+        for (uint8_t i = 0; i < count; ++i) {
+          swap = pt[i].x;
+          pt[i].x = width() - pt[i].y;
+          pt[i].y = swap;
+        }
+      }
+    }[(R>>5) & 3])();
+    return ok;
+  }
+
+  inline size_t touch_count() {
+    static uint8_t stat[1] = { 0 };
+    size_t count = 0;
+    if (rx(_reg_stat, stat, sizeof(stat))) {
+      count = stat[0];
+    }
+    memset(stat, 0, sizeof(stat));
+    if (((count & 0x80) > 0) && ((count & 0x0F) < _touch_max)) {
+      tx(_reg_stat, stat, sizeof(stat));
+      count &= 0x0F;
+    }
+    return count;
+  }
 
 private:
   static lv_disp_t          *_disp;
@@ -161,89 +235,28 @@ private:
   Ticker _tick;
 
 public:
-  TFT_SPI() = default;
+  TPC_LCD(): SPIClass(_spi_bus), TwoWire(_i2c_bus) {}
 
   bool init();
+
+  // lvgl API methods
   void flush(lv_disp_drv_t *drv, const lv_area_t *area, lv_color_t *color);
+  void read(lv_indev_drv_t *drv, lv_indev_data_t *data);
 
-  inline void set_backlight(uint16_t duty) { ledcWrite(_pwm_blt_chan, duty); }
+  template<uint8_t C = _pwm_blt_chan>
+  static inline void set_backlight(uint16_t duty) { ledcWrite(C, duty); }
 
-  static inline constexpr uint8_t pixel_order() { return _tft_subord; }
   static inline constexpr msec_t refresh() { return _tft_refresh; }
+
+  static inline constexpr bool wide() {
+    return (_tft_aspect & static_cast<uint8_t>(madctl_t::mv)) > 0; // transpose?
+  }
   static inline constexpr uint16_t width() {
-    return rotate_t(_tft_rotate).wide_aspect() ? _tft_height : _tft_width;
+    return wide() ? _tft_height : _tft_width;
   }
   static inline constexpr uint16_t height() {
-    return rotate_t(_tft_rotate).wide_aspect() ? _tft_width : _tft_height;
+    return wide() ? _tft_width : _tft_height;
   }
-  static inline constexpr rotate_t rotation() {
-    return _tft_rotate;
-  }
-};
-
-class TPC_I2C: public TwoWire { // GT911 capacitive touch
-private:
-protected:
-  struct __attribute__((packed)) point {
-    // 0x814F-0x8156, ... 0x8176 (5 points)
-    uint8_t track;
-    uint16_t x; // unaligned
-    uint16_t y;
-    uint16_t area;
-    uint8_t _u8[1];
-  };
-
-  static uint8_t const _bus_id   = 1U; // extern TwoWire Wire1
-
-  static uint8_t  const _dev_addr = 0x5D;   // I²C device address
-  static uint16_t const _reg_pid1 = 0x8140; // product ID (byte 1/4)
-  static uint16_t const _reg_stat = 0x814E; // buffer/track status
-  static uint16_t const _reg_tid1 = 0x814F; // track ID
-
-  static size_t const _size_pid = 4U; // bytes
-
-  static gpin_t const _pin_scl = 32U;
-  static gpin_t const _pin_sda = 33U;
-  static gpin_t const _pin_int = 21U;
-  static gpin_t const _pin_rst = 25U;
-
-  static size_t const _touch_max = 5U; // simultaneous touch points
-
-  inline bool reg16(uint16_t const reg) {
-    beginTransmission(_dev_addr);
-    return TwoWire::write(static_cast<uint8_t>(reg >> 8)) && // MSB (first)
-      TwoWire::write(static_cast<uint8_t>(reg & 0xFF));      // LSB
-  }
-  inline bool write(uint16_t const reg, uint8_t * const buf, size_t const len) {
-    size_t sent = 0U;
-    if (reg16(reg)) {
-      sent = TwoWire::write(buf, len);
-    }
-    endTransmission();
-    return sent == len;
-  }
-  inline bool read(uint16_t const reg, uint8_t * const buf, size_t const len) {
-    uint8_t *dst = buf;
-    size_t rem = 0U;
-    bool ok = reg16(reg);
-    endTransmission(false);
-    if (ok && (len == (rem = requestFrom(_dev_addr, len)))) {
-      while (available() && rem--) {
-        *(dst++) = TwoWire::read();
-      }
-    }
-    return rem == 0 && dst != buf;
-  }
-  inline bool read(uint16_t const reg, point * const buf, size_t const len) {
-    return read(reg, (uint8_t *)buf, len);
-  }
-
-public:
-  TPC_I2C(): TwoWire(_bus_id) {}
-  bool init();
-  size_t count();
-  bool get(point * const pt, size_t count);
-  void read(lv_indev_drv_t *drv, lv_indev_data_t *data);
 };
 
 class RGB_PWM { // RGB 3-pin analog LED
@@ -314,8 +327,7 @@ private:
   static msec_t const _refresh = 5U;
 protected:
 public:
-  TFT_SPI tft;
-  TPC_I2C tpc;
+  TPC_LCD lcd;
   RGB_PWM rgb;
   AMP_PWM amp;
   CDS_ADC cds;
