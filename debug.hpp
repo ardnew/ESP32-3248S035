@@ -1,5 +1,5 @@
-#ifndef trace_h
-#define trace_h
+#ifndef debug_h
+#define debug_h
 
 #include <string>
 
@@ -17,4 +17,4 @@ size_t swritef(Stream &out, const char * fmt, Args... args) {
   return out.write(str.c_str(), size) + out.write(eol);
 }
 
-#endif // trace_h
+#endif // debug_h

@@ -1,30 +1,14 @@
 #include "ESP323248S035.h"
 
-#include "debug.h"
+#include "callback.hpp"
 
-// THROTTLE invokes <fn> if and only if <per> milliseconds have elapsed since
-// the last time <fn> was invoked from this macro (or if it is being invoked for
-// the first time).
-//
-// This is a simple (naïve) way to implement periodic function calls without
-// blocking (no delay()) on a single thread. If insufficient time has elapsed,
-// nothing is invoked and execution continues.
-//
-// THROTTLE is not interrupt-driven or atomic. It will gladly run <fn> forever
-// if permitted.
-//
-// Call THROTTLE as frequently as possible for best accuracy.
-//
-// Concatenate <per> to "prev_" for the static variable name so that multiple
-// calls to THROTTLE can be nested in a common scope.
-// syntax of <per> must be a variable identifier, macro, or numeric literal.
-#define THROTTLE(fn,now,per) {         \
-    static msec_t prev_ ## per = 0UL; \
-    if ((now) - prev_ ## per >= per) { \
-      fn;                              \
-      prev_ ## per = (now);            \
-    }                                  \
-  }
+// lvgl C API functions
+#if (LV_USE_LOG)
+typedef void (*log_t)(const char *);
+#endif
+typedef void (*tick_t)();
+typedef void (*flush_t)(lv_disp_drv_t *, const lv_area_t *, lv_color_t *);
+typedef void (*read_t)(lv_indev_drv_t *, lv_indev_data_t *);
 
 lv_disp_t          *TPC_LCD::_disp;
 lv_disp_drv_t       TPC_LCD::_ddrv;
@@ -33,30 +17,13 @@ lv_color_t          TPC_LCD::_fb[TPC_LCD::_tft_width * 10];
 lv_indev_t         *TPC_LCD::_inpt;
 lv_indev_drv_t      TPC_LCD::_idrv;
 
-ESP323248S035C hmi;
-
-#if (LV_USE_LOG)
-static void c_log(const char *buf) { swritef(Serial, "%s", buf); }
-#endif
-
-void c_tick() { lv_tick_inc(TPC_LCD::refresh()); }
-
-void c_flush(lv_disp_drv_t *drv, const lv_area_t *area, lv_color_t *color) {
-  hmi.lcd.flush(drv, area, color);
-}
-
-void c_read(lv_indev_drv_t *drv, lv_indev_data_t *data) {
-  hmi.lcd.read(drv, data);
-}
-
 bool TPC_LCD::init() {
 #if (LV_USE_LOG)
-  lv_log_register_print_cb(c_log);
+  lv_log_register_print_cb(static_cast<log_t>(&TPC_LCD::log));
 #endif
 
   lv_init();
   SPIClass::begin(_pin_sck, _pin_sdi, _pin_sdo);
-
 
   pinMode(_pin_sdc, OUTPUT); // D/C
   pinMode(_pin_sel, OUTPUT); // CS
@@ -88,15 +55,20 @@ bool TPC_LCD::init() {
   lv_disp_drv_init(&_ddrv);
   _ddrv.hor_res = width();
   _ddrv.ver_res = height();
-  _ddrv.flush_cb = c_flush;
+  Callback<void(lv_disp_drv_t *, const lv_area_t *, lv_color_t *)>::fn =
+    std::bind(&TPC_LCD::flush, this,
+    std::placeholders::_1, std::placeholders::_2, std::placeholders::_3);
+  _ddrv.flush_cb = static_cast<flush_t>(
+    Callback<void(lv_disp_drv_t *, const lv_area_t *, lv_color_t *)>::callback);
   _ddrv.draw_buf = &_draw;
   _disp = lv_disp_drv_register(&_ddrv);
 
   lv_obj_clean(lv_scr_act());
 
   // TODO: calibrate touch?
-  bool ok = false;
-  if (TwoWire::begin(_pin_sda, _pin_scl)) {
+  bool ok;
+
+  if ((ok = TwoWire::begin(_pin_sda, _pin_scl))) {
     static uint8_t pid[_size_prod_id];
     if ((ok = rx(_reg_prod_id, pid, sizeof(pid)))) {
       swritef(Serial, "TPC_I2C: device ID = %u");
@@ -105,12 +77,20 @@ bool TPC_LCD::init() {
 
   lv_indev_drv_init(&_idrv);
   _idrv.type = LV_INDEV_TYPE_POINTER;
-  _idrv.read_cb = c_read;
+  Callback<void(lv_indev_drv_t *, lv_indev_data_t *)>::fn =
+    std::bind(&TPC_LCD::read, this,
+    std::placeholders::_1, std::placeholders::_2);
+  _idrv.read_cb = static_cast<read_t>(
+    Callback<void(lv_indev_drv_t *, lv_indev_data_t *)>::callback);
   _inpt = lv_indev_drv_register(&_idrv);
 
-  _tick.attach_ms(_tft_refresh, c_tick);
+  _tick.attach_ms(_tft_refresh, static_cast<tick_t>(&TPC_LCD::tick));
 
   return ok;
+}
+
+void TPC_LCD::update(msec_t const now) {
+  lv_timer_handler();
 }
 
 void TPC_LCD::flush(lv_disp_drv_t *drv, const lv_area_t *area, lv_color_t *color) {
@@ -167,6 +147,9 @@ bool RGB_PWM::init() {
   return true;
 }
 
+void RGB_PWM::update(msec_t const now) {
+}
+
 void RGB_PWM::set(lv_color32_t const rgb) {
   ledcWrite(_pwm_r_chan, _pwm_hres - rgb.ch.red);
   ledcWrite(_pwm_g_chan, _pwm_hres - rgb.ch.green);
@@ -176,6 +159,9 @@ void RGB_PWM::set(lv_color32_t const rgb) {
 bool AMP_PWM::init() {
   pinMode(_pin, INPUT); // High impedence
   return true;
+}
+
+void AMP_PWM::update(msec_t const now) {
 }
 
 void AMP_PWM::set(uint32_t const hz, msec_t const ms) {
@@ -192,12 +178,18 @@ bool CDS_ADC::init() {
   return true;
 }
 
+void CDS_ADC::update(msec_t const now) {
+}
+
 int CDS_ADC::get() {
   return analogRead(_pin);
 }
 
 bool SDC_SPI::init() {
   return true;
+}
+
+void SDC_SPI::update(msec_t const now) {
 }
 
 ESP323248S035C::ESP323248S035C() {}
@@ -216,7 +208,9 @@ bool ESP323248S035C::init() {
 }
 
 void ESP323248S035C::update(msec_t const now) {
-
-  lv_timer_handler();
-  //THROTTLE(, now, _refresh);
+  sdc.update(now);
+  cds.update(now);
+  rgb.update(now);
+  lcd.update(now);
+  amp.update(now);
 }

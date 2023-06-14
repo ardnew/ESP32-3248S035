@@ -9,10 +9,43 @@
 
 #include <stdint.h>
 
+#include "debug.hpp"
+
+// THROTTLE invokes <fn> if and only if <per> milliseconds have elapsed since
+// the last time <fn> was invoked from this macro (or if it is being invoked for
+// the first time).
+//
+// This is a simple naïve way to implement periodic function calls on a single
+// thread without blocking (no delay()). If insufficient time has elapsed,
+// nothing is invoked and execution continues.
+//
+// THROTTLE is not interrupt-driven or atomic. It will gladly run <fn> forever
+// or never at all under the right circumstances. Since it runs on the main
+// thread, it's reasonable to expect to be preempted at any moment.
+//
+// Call THROTTLE as frequently as possible for best accuracy.
+//
+// Concatenate <per> to "prev_" for the static variable name so that multiple
+// calls to THROTTLE can be nested in a common scope.
+// Syntax of <per> must be a variable identifier, macro, or numeric literal —
+// notably, this excludes expressions like arithmetic and application "()".
+#define THROTTLE(fn,now,per) {         \
+    static msec_t prev_ ## per = 0UL;  \
+    if ((now) - prev_ ## per >= per) { \
+      fn;                              \
+      prev_ ## per = (now);            \
+    }                                  \
+  }
+
 typedef unsigned long msec_t;
 typedef int8_t        gpin_t;
 
-class TPC_LCD: public SPIClass, public TwoWire {
+struct periodic_t {
+  virtual bool init() = 0;
+  virtual void update(msec_t const) = 0;
+};
+
+class TPC_LCD: periodic_t, public SPIClass, public TwoWire {
 protected:
   struct __attribute__((packed)) point_t {
     // attributes of an individual touch event, this structure is repeated
@@ -108,6 +141,14 @@ protected:
   static uint16_t constexpr _reg_base_point = 0x814F;
   static size_t   constexpr _touch_max      = 5U; // simultaneous touch points
 
+  // lvgl API methods
+#if (LV_USE_LOG)
+  static inline void log(const char *buf) { swritef(Serial, "%s", buf); }
+#endif
+  static inline void tick() { lv_tick_inc(_tft_refresh); }
+  void flush(lv_disp_drv_t *drv, const lv_area_t *area, lv_color_t *color);
+  void read(lv_indev_drv_t *drv, lv_indev_data_t *data);
+
   template <class ...E>
   void tx(cmd_t const code, E ...e) {
     constexpr size_t size = sizeof...(e);
@@ -169,10 +210,10 @@ protected:
     return rx(reg, (uint8_t *)buf, len);
   }
 
-  template <unsigned N = 0>
-  static inline constexpr uint16_t track() {
-    return _reg_base_point + N * sizeof(point_t) + offsetof(point_t, track);
-  }
+  // template <unsigned N = 0>
+  // static inline constexpr uint16_t track() {
+  //   return _reg_base_point + N * sizeof(point_t) + offsetof(point_t, track);
+  // }
 
   template<uint16_t R = _tft_aspect>
   inline bool map(point_t * const pt, size_t count) {
@@ -237,16 +278,11 @@ private:
 public:
   TPC_LCD(): SPIClass(_spi_bus), TwoWire(_i2c_bus) {}
 
-  bool init();
-
-  // lvgl API methods
-  void flush(lv_disp_drv_t *drv, const lv_area_t *area, lv_color_t *color);
-  void read(lv_indev_drv_t *drv, lv_indev_data_t *data);
+  bool init() override;
+  void update(msec_t const now) override;
 
   template<uint8_t C = _pwm_blt_chan>
   static inline void set_backlight(uint16_t duty) { ledcWrite(C, duty); }
-
-  static inline constexpr msec_t refresh() { return _tft_refresh; }
 
   static inline constexpr bool wide() {
     return (_tft_aspect & static_cast<uint8_t>(madctl_t::mv)) > 0; // transpose?
@@ -259,7 +295,7 @@ public:
   }
 };
 
-class RGB_PWM { // RGB 3-pin analog LED
+class RGB_PWM: periodic_t { // RGB 3-pin analog LED
 private:
 protected:
   static gpin_t const _pin_r =  4U;
@@ -275,22 +311,24 @@ protected:
   static uint8_t  const _pwm_hres   = (1U << _pwm_bits) - 1U;
 
 public:
-  bool init();
+  bool init() override;
+  void update(msec_t const now) override;
   void set(lv_color32_t const rgb);
 };
 
-class AMP_PWM { // Autio amplifier
+class AMP_PWM: periodic_t { // Autio amplifier
 private:
 protected:
   static gpin_t const _pin = 26U;
 
 public:
-  bool init();
+  bool init() override;
+  void update(msec_t const now) override;
   void set(uint32_t const hz, msec_t const ms);
   void mute();
 };
 
-class CDS_ADC { // Light sensitive photo-resistor
+class CDS_ADC: periodic_t { // Light sensitive photo-resistor
 private:
 protected:
   static adc_attenuation_t const _att = ADC_0db; // 0dB (1.0x): 0~800mV
@@ -298,11 +336,12 @@ protected:
   static gpin_t const _pin = 34U; // A0
 
 public:
-  bool init();
+  bool init() override;
+  void update(msec_t const now) override;
   int get();
 };
 
-class SDC_SPI { // MicroSD card
+class SDC_SPI: periodic_t { // MicroSD card
 private:
 protected:
   static gpin_t const _pin_sdi = 19U;
@@ -311,20 +350,15 @@ protected:
   static gpin_t const _pin_sel =  5U;
 
 public:
-  bool init();
+  bool init() override;
+  void update(msec_t const now) override;
 };
 
-class ESP323248S035 {
-private:
-protected:
-public:
-  virtual bool init() = 0;
-  virtual void update(msec_t const now) = 0;
-};
+class ESP323248S035: periodic_t {};
 
 class ESP323248S035C: public ESP323248S035 {
 private:
-  static msec_t const _refresh = 5U;
+  static constexpr msec_t _refresh = 5U;
 protected:
 public:
   TPC_LCD lcd;
@@ -334,10 +368,9 @@ public:
   SDC_SPI sdc;
   ESP323248S035C();
   virtual ~ESP323248S035C();
-  bool init();
-  void update(msec_t const now);
+  bool init() override;
+  void update(msec_t const now) override;
+  static inline constexpr msec_t refresh() { return _refresh; }
 };
-
-extern ESP323248S035C hmi;
 
 #endif // ESP323248S035_h
