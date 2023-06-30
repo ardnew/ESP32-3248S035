@@ -10,20 +10,9 @@
   "dependencies": {
     "SPI": "^2.0.0",
     "Wire": "^2.0.0.",
-    "lvgl/lvgl": "^8.3.4",
-    "StatusLED": ".*"
+    "lvgl/lvgl": "^8.3.4"
   },
   "headers": [ "ESP323248S035.h" ],
-  "build": {
-    "includeDir": ".",
-    "srcDir": ".",
-    "srcFilter": "+<*> -<examples> -<extras> -<tests>"
-  },
-  "export": {
-    "include": [ "include", "src" ],
-    "exclude": [ "examples", "extras", "tests" ]
-  },
-  "examples": [],
   "repository": {
     "type": "git",
     "url": "https://github.com/ardnew/ESP32-3248S035"

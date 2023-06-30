@@ -11,32 +11,6 @@
 
 #include "debug.hpp"
 
-// THROTTLE invokes <fn> if and only if <per> milliseconds have elapsed since
-// the last time <fn> was invoked from this macro (or if it is being invoked for
-// the first time).
-//
-// This is a simple naïve way to implement periodic function calls on a single
-// thread without blocking (no delay()). If insufficient time has elapsed,
-// nothing is invoked and execution continues.
-//
-// THROTTLE is not interrupt-driven or atomic. It will gladly run <fn> forever
-// or never at all under the right circumstances. Since it runs on the main
-// thread, it's reasonable to expect to be preempted at any moment.
-//
-// Call THROTTLE as frequently as possible for best accuracy.
-//
-// Concatenate <per> to "prev_" for the static variable name so that multiple
-// calls to THROTTLE can be nested in a common scope.
-// Syntax of <per> must be a variable identifier, macro, or numeric literal —
-// notably, this excludes expressions like arithmetic and application "()".
-#define THROTTLE(fn,now,per) {         \
-    static msec_t prev_ ## per = 0UL;  \
-    if ((now) - prev_ ## per >= per) { \
-      fn;                              \
-      prev_ ## per = (now);            \
-    }                                  \
-  }
-
 typedef unsigned long msec_t;
 typedef int8_t        gpin_t;
 
@@ -128,7 +102,7 @@ protected:
   static uint8_t  constexpr _pwm_blt_bits   = 8U;
   static uint8_t  constexpr _pwm_blt_hres   = (1U << _pwm_blt_bits) - 1U;
   // TFT configuration
-  static msec_t   constexpr _tft_refresh    =  10U; // milliseconds
+  static msec_t   constexpr _tft_refresh    = 10U;  // milliseconds
   static uint16_t constexpr _tft_width      = 320U; // Use width() and height()
   static uint16_t constexpr _tft_height     = 480U; //  to account for rotation.
   static uint8_t  constexpr _tft_depth      = static_cast<uint8_t>(colmod_t::rgb656);
@@ -150,7 +124,7 @@ protected:
   void read(lv_indev_drv_t *drv, lv_indev_data_t *data);
 
   template <class ...E>
-  void tx(cmd_t const code, E ...e) {
+  void tx(cmd_t const code, E... e) {
     constexpr size_t size = sizeof...(e);
     uint8_t data[size] = { static_cast<uint8_t>(e)... };
     digitalWrite(_pin_sdc, LOW); // D/C ⇒ command
@@ -281,6 +255,9 @@ public:
   bool init() override;
   void update(msec_t const now) override;
 
+  void layout();
+  static inline void scroll_begin(lv_event_t *ev);
+
   template<uint8_t C = _pwm_blt_chan>
   static inline void set_backlight(uint16_t duty) { ledcWrite(C, duty); }
 
@@ -366,11 +343,18 @@ public:
   AMP_PWM amp;
   CDS_ADC cds;
   SDC_SPI sdc;
+
+  static inline constexpr msec_t refresh() { return _refresh; }
+
   ESP323248S035C();
   virtual ~ESP323248S035C();
   bool init() override;
   void update(msec_t const now) override;
-  static inline constexpr msec_t refresh() { return _refresh; }
+
+  template <class ...E>
+  void update(msec_t const now, E... e) {
+    (int[]){ (e->update(now), 0)... };
+  }
 };
 
 #endif // ESP323248S035_h

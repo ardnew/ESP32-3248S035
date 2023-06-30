@@ -7,7 +7,7 @@
 //
 // Using this approach allows us to avoid using C functions that refer to
 // methods of global library objects (e.g., Arduino often uses a convention such
-// as "extern TwoWire Wire", where "Wire" if then called from C ISRs).
+// as "extern TwoWire Wire", where "Wire" is then called from C ISRs).
 //
 // Source: https://replit.com/@gbmhunter/c-callback-in-cpp-using-templating-functional-bind#main.cpp
 

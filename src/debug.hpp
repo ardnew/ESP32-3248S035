@@ -5,7 +5,7 @@
 
 #include <stdio.h> // snprintf
 
-template<typename... Args>
+template <typename... Args>
 size_t swritef(Stream &out, const char * fmt, Args... args) {
   static constexpr char eol[] = "\r\n";
   // Cannot rely on the target implementation of Stream to provide printf

@@ -2,6 +2,32 @@
 
 #include "callback.hpp"
 
+// THROTTLE invokes <fn> if and only if <per> milliseconds have elapsed since
+// the last time <fn> was invoked from this macro (or if it is being invoked for
+// the first time).
+//
+// This is a simple naïve way to implement periodic function calls on a single
+// thread without blocking (no delay()). If insufficient time has elapsed,
+// nothing is invoked and execution continues.
+//
+// THROTTLE is not interrupt-driven or atomic. It will gladly run <fn> forever
+// or never at all under the right circumstances. Since it runs on the main
+// thread, it's reasonable to expect to be preempted at any moment.
+//
+// Call THROTTLE as frequently as possible for best accuracy.
+//
+// Concatenate <per> to "prev_" for the static variable name so that multiple
+// calls to THROTTLE can be nested in a common scope.
+// Syntax of <per> must be a variable identifier, macro, or numeric literal —
+// notably, this excludes expressions like arithmetic and application "()".
+#define THROTTLE(fn,now,per) {         \
+    static msec_t prev_ ## per = 0UL;  \
+    if ((now) - prev_ ## per >= per) { \
+      fn;                              \
+      prev_ ## per = (now);            \
+    }                                  \
+  }
+
 // lvgl C API functions
 #if (LV_USE_LOG)
 typedef void (*log_t)(const char *);
@@ -9,6 +35,7 @@ typedef void (*log_t)(const char *);
 typedef void (*tick_t)();
 typedef void (*flush_t)(lv_disp_drv_t *, const lv_area_t *, lv_color_t *);
 typedef void (*read_t)(lv_indev_drv_t *, lv_indev_data_t *);
+typedef void (*scroll_begin_t)(lv_event_t *);
 
 lv_disp_t          *TPC_LCD::_disp;
 lv_disp_drv_t       TPC_LCD::_ddrv;
@@ -86,11 +113,85 @@ bool TPC_LCD::init() {
 
   _tick.attach_ms(_tft_refresh, static_cast<tick_t>(&TPC_LCD::tick));
 
+  layout();
+
   return ok;
 }
 
 void TPC_LCD::update(msec_t const now) {
   lv_timer_handler();
+}
+
+void TPC_LCD::layout() {
+
+  /*Create a Tab view object*/
+  lv_obj_t *tabview;
+  tabview = lv_tabview_create(lv_scr_act(), LV_DIR_LEFT, 80);
+
+  lv_obj_add_event_cb(
+    lv_tabview_get_content(tabview),
+    static_cast<scroll_begin_t>(&TPC_LCD::scroll_begin),
+    LV_EVENT_SCROLL_BEGIN, NULL);
+
+  lv_obj_set_style_bg_color(tabview, lv_palette_lighten(LV_PALETTE_RED, 2), 0);
+
+  lv_obj_t * tab_btns = lv_tabview_get_tab_btns(tabview);
+  lv_obj_set_style_bg_color(tab_btns, lv_palette_darken(LV_PALETTE_GREY, 3), 0);
+  lv_obj_set_style_text_color(tab_btns, lv_palette_lighten(LV_PALETTE_GREY, 5), 0);
+  lv_obj_set_style_border_side(tab_btns, LV_BORDER_SIDE_RIGHT, LV_PART_ITEMS | LV_STATE_CHECKED);
+
+
+  /*Add 3 tabs (the tabs are page (lv_page) and can be scrolled*/
+  lv_obj_t *tab1 = lv_tabview_add_tab(tabview, "Tab 1");
+  lv_obj_t *tab2 = lv_tabview_add_tab(tabview, "Tab 2");
+  lv_obj_t *tab3 = lv_tabview_add_tab(tabview, "Tab 3");
+  lv_obj_t *tab4 = lv_tabview_add_tab(tabview, "Tab 4");
+  lv_obj_t *tab5 = lv_tabview_add_tab(tabview, "Tab 5");
+
+  lv_obj_set_style_bg_color(tab2, lv_palette_lighten(LV_PALETTE_AMBER, 3), 0);
+  lv_obj_set_style_bg_opa(tab2, LV_OPA_COVER, 0);
+
+  /*Add content to the tabs*/
+  //    lv_obj_t * label = lv_label_create(tab1);
+  //    lv_label_set_text(label, "First tab");
+  lv_obj_t                  *_scaleChart;
+  // lv_chart_series_t         *_scaleSeries;
+
+  _scaleChart = lv_chart_create(tab1);
+  lv_obj_set_size(_scaleChart, _tft_width - 80 - 10, _tft_height - 10);
+  lv_obj_center(_scaleChart);
+  lv_chart_set_type(_scaleChart, LV_CHART_TYPE_LINE);   /*Show lines and points too*/
+
+  /*Add two data series*/
+  lv_chart_add_series(_scaleChart, lv_palette_main(LV_PALETTE_RED), LV_CHART_AXIS_PRIMARY_Y);
+  lv_chart_set_point_count(_scaleChart, 100);
+  lv_chart_set_update_mode(_scaleChart, LV_CHART_UPDATE_MODE_SHIFT);
+
+
+  lv_obj_t *label = lv_label_create(tab2);
+  // lv_obj_set_style_text_font(label, &beans_16, 0);
+  lv_label_set_text(label, "Second tab");
+
+  label = lv_label_create(tab3);
+  lv_label_set_text(label, "Third tab");
+
+  label = lv_label_create(tab4);
+  lv_label_set_text(label, "Forth tab");
+
+  label = lv_label_create(tab5);
+  lv_label_set_text(label, "Fifth tab");
+
+  lv_obj_clear_flag(lv_tabview_get_content(tabview), LV_OBJ_FLAG_SCROLLABLE);
+
+}
+
+inline void TPC_LCD::scroll_begin(lv_event_t * e)
+{
+  /*Disable the scroll animations. Triggered when a tab button is clicked */
+  if (lv_event_get_code(e) == LV_EVENT_SCROLL_BEGIN) {
+    lv_anim_t *a = (lv_anim_t *)lv_event_get_param(e);
+    if (a) { a->time = 0; }
+  }
 }
 
 void TPC_LCD::flush(lv_disp_drv_t *drv, const lv_area_t *area, lv_color_t *color) {
@@ -144,6 +245,9 @@ bool RGB_PWM::init() {
   digitalWrite(_pin_b, true);
   ledcSetup(_pwm_b_chan, _pwm_freq, _pwm_bits);
   ledcAttachPin(_pin_b, _pwm_b_chan);
+
+  set(lv_color32_t{.full = 0x003300AA});
+
   return true;
 }
 
@@ -208,9 +312,5 @@ bool ESP323248S035C::init() {
 }
 
 void ESP323248S035C::update(msec_t const now) {
-  sdc.update(now);
-  cds.update(now);
-  rgb.update(now);
-  lcd.update(now);
-  amp.update(now);
+  THROTTLE(update(now, &sdc, &cds, &rgb, &lcd, &amp), now, _refresh);
 }
