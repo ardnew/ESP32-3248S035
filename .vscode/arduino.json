@@ -1,0 +1,22 @@
+{
+    "configuration": "JTAGAdapter=default,PSRAM=disabled,PartitionScheme=min_spiffs,CPUFreq=240,FlashMode=qio,FlashFreq=80,FlashSize=4M,UploadSpeed=921600,LoopCore=1,EventsCore=1,DebugLevel=verbose,EraseFlash=none",
+    "board": "esp32:esp32:esp32",
+    "sketch": "client.ino",
+    "output": ".build",
+    "intelliSenseGen": "disable",
+    "buildPreferences": [
+        [
+            "compiler.c.extra_flags",
+            "-std=gnu17"
+        ],
+        [
+            "compiler.cpp.extra_flags",
+            "-std=gnu++17"
+        ],
+        [
+            "build.extra_flags",
+            "-DUSE_TRACE -DDEBUG=1 -I/opt/FreePOS/src/api"
+        ]
+    ],
+    "port": "/dev/ttyUSB0"
+}

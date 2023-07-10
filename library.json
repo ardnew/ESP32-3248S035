@@ -8,6 +8,7 @@
   "frameworks": [ "arduino" ],
   "platforms": [ "espressif32" ],
   "dependencies": {
+    "BLE": "*",
     "SPI": "^2.0.0",
     "Wire": "^2.0.0.",
     "lvgl/lvgl": "^8.3.4"

@@ -6,20 +6,55 @@
 #include <SPI.h>
 #include <Wire.h>
 #include <lvgl.h>
+#include <StatusLED.h>
 
 #include <stdint.h>
+#include <chrono>
+#include <utility>
+#include <mutex>
 
 #include "debug.hpp"
 
-typedef unsigned long msec_t;
-typedef int8_t        gpin_t;
+typedef std::chrono::duration<uint32_t, std::milli> msec_t; // milliseconds
+inline msec_t msecs() { return msec_t{millis()}; }
 
-struct periodic_t {
-  virtual bool init() = 0;
+// Function govern uses the FreeRTOS API call vTaskDelayUntil to implement
+// periodic functions with very precise and accurate cycle durations.
+template <const uint32_t N>
+void govern(std::function<void(void)> func) {
+  // Convert type of template parameter N from milliseconds to processor ticks
+  // per FreeRTOS API function vTaskDelayUntil.
+  static constexpr TickType_t freq = N / portTICK_PERIOD_MS;
+  TickType_t last = xTaskGetTickCount();
+  for (;;) {
+    vTaskDelayUntil(&last, freq);
+    func();
+  }
+}
+
+typedef int8_t gpin_t;
+
+struct Cyclic {
   virtual void update(msec_t const) = 0;
 };
 
-class TPC_LCD: periodic_t, public SPIClass, public TwoWire {
+struct Periodic: Cyclic {
+  virtual bool init() = 0;
+};
+
+struct View: Cyclic {
+  virtual bool init(lv_obj_t *) = 0;
+  virtual std::string title() = 0;
+};
+
+template <typename T>
+struct Viewable {
+    constexpr static bool check(View *) { return true; }
+    constexpr static bool check(...)    { return false; }
+    enum { value = check(static_cast<T*>(0)) };
+};
+
+class TPC_LCD: public Periodic, public SPIClass, public TwoWire {
 protected:
   struct __attribute__((packed)) point_t {
     // attributes of an individual touch event, this structure is repeated
@@ -36,7 +71,8 @@ protected:
     uint16_t x;
     uint16_t y;
     uint16_t area;
-    uint8_t _u8[1];
+    // 1 pad byte makes 64 bits in (packed) struct
+    uint8_t _u8[1]; // Value is irrelevant
   };
   enum class cmd_t: uint8_t {
     swreset = 0x01, // Software Reset
@@ -102,9 +138,9 @@ protected:
   static uint8_t  constexpr _pwm_blt_bits   = 8U;
   static uint8_t  constexpr _pwm_blt_hres   = (1U << _pwm_blt_bits) - 1U;
   // TFT configuration
-  static msec_t   constexpr _tft_refresh    = 10U;  // milliseconds
-  static uint16_t constexpr _tft_width      = 320U; // Use width() and height()
-  static uint16_t constexpr _tft_height     = 480U; //  to account for rotation.
+  static msec_t   constexpr _tft_refresh    = msec_t{10};  // milliseconds
+  static uint16_t constexpr _tft_width      = 320U; // Physical dimensions, does
+  static uint16_t constexpr _tft_height     = 480U; // not consider rotations.
   static uint8_t  constexpr _tft_depth      = static_cast<uint8_t>(colmod_t::rgb656);
   static uint8_t  constexpr _tft_subpixel   = static_cast<uint8_t>(madctl_t::rgb);
   static uint8_t  constexpr _tft_aspect     = static_cast<uint8_t>(madctl_t::wide_inverted);
@@ -117,9 +153,9 @@ protected:
 
   // lvgl API methods
 #if (LV_USE_LOG)
-  static inline void log(const char *buf) { swritef(Serial, "%s", buf); }
+  static inline void log(const char *buf) { writef(Serial, "%s", buf); }
 #endif
-  static inline void tick() { lv_tick_inc(_tft_refresh); }
+  static inline void tick() { lv_tick_inc(_tft_refresh.count()); }
   void flush(lv_disp_drv_t *drv, const lv_area_t *area, lv_color_t *color);
   void read(lv_indev_drv_t *drv, lv_indev_data_t *data);
 
@@ -247,16 +283,19 @@ private:
   static lv_indev_t         *_inpt;
   static lv_indev_drv_t      _idrv;
 
+  std::mutex _mutx;
+
   Ticker _tick;
+  View &_view;
 
 public:
-  TPC_LCD(): SPIClass(_spi_bus), TwoWire(_i2c_bus) {}
+  TPC_LCD() = delete; // display driver must have a root view!
+  explicit TPC_LCD(View &root):
+    SPIClass(_spi_bus), TwoWire(_i2c_bus), _view(root) {}
+  virtual ~TPC_LCD() {}
 
   bool init() override;
   void update(msec_t const now) override;
-
-  void layout();
-  static inline void scroll_begin(lv_event_t *ev);
 
   template<uint8_t C = _pwm_blt_chan>
   static inline void set_backlight(uint16_t duty) { ledcWrite(C, duty); }
@@ -272,7 +311,7 @@ public:
   }
 };
 
-class RGB_PWM: periodic_t { // RGB 3-pin analog LED
+class RGB_PWM: Periodic, public StatusLED { // RGB 3-pin analog LED
 private:
 protected:
   static gpin_t const _pin_r =  4U;
@@ -287,26 +326,47 @@ protected:
   static uint8_t  const _pwm_bits   = 8U;
   static uint8_t  const _pwm_hres   = (1U << _pwm_bits) - 1U;
 
+private:
+  std::mutex _mutx;
+
 public:
+  RGB_PWM():
+    StatusLED(
+      _pin_r, _pin_g, _pin_b, HIGH, StatusLEDMode::Fixed, 100U, true,
+        COLOR_RED, 0x3F
+    ){
+      setWrite([&](SRGB const &rgb) {
+        // write() always clips its actual argument's components to 8-bits,
+        // so there is no narrowing happening in these typecasts.
+        set(LV_COLOR_MAKE32(
+          (uint8_t)rgb.red, (uint8_t)rgb.green, (uint8_t)rgb.blue));
+      });
+    }
   bool init() override;
   void update(msec_t const now) override;
+
   void set(lv_color32_t const rgb);
 };
 
-class AMP_PWM: periodic_t { // Autio amplifier
+class AMP_PWM: Periodic { // Autio amplifier
 private:
+  std::mutex _mutx;
+
 protected:
   static gpin_t const _pin = 26U;
 
 public:
   bool init() override;
   void update(msec_t const now) override;
+
   void set(uint32_t const hz, msec_t const ms);
   void mute();
 };
 
-class CDS_ADC: periodic_t { // Light sensitive photo-resistor
+class CDS_ADC: Periodic { // Light sensitive photo-resistor
 private:
+  std::mutex _mutx;
+
 protected:
   static adc_attenuation_t const _att = ADC_0db; // 0dB (1.0x): 0~800mV
 
@@ -315,11 +375,14 @@ protected:
 public:
   bool init() override;
   void update(msec_t const now) override;
+
   int get();
 };
 
-class SDC_SPI: periodic_t { // MicroSD card
+class SDC_SPI: Periodic { // MicroSD card
 private:
+  std::mutex _mutx;
+
 protected:
   static gpin_t const _pin_sdi = 19U;
   static gpin_t const _pin_sdo = 23U;
@@ -331,30 +394,61 @@ public:
   void update(msec_t const now) override;
 };
 
-class ESP323248S035: periodic_t {};
+class ESP323248S035: Periodic {};
 
+template <class V>
 class ESP323248S035C: public ESP323248S035 {
-private:
-  static constexpr msec_t _refresh = 5U;
-protected:
-public:
-  TPC_LCD lcd;
-  RGB_PWM rgb;
-  AMP_PWM amp;
-  CDS_ADC cds;
-  SDC_SPI sdc;
+  // You must be careful to not make any lvgl API calls from C's default
+  // constructor, since the library will be initialized after C::C() is called.
+  // Initialization should be performed in View::init(lv_obj_t *).
+  static_assert(Viewable<V>::value);
 
+protected:
+  static constexpr msec_t _refresh = msec_t{1};
+public:
   static inline constexpr msec_t refresh() { return _refresh; }
 
-  ESP323248S035C();
-  virtual ~ESP323248S035C();
-  bool init() override;
-  void update(msec_t const now) override;
+protected:
+  TPC_LCD _tpc;
+  RGB_PWM _rgb;
+  AMP_PWM _amp;
+  CDS_ADC _cds;
+  SDC_SPI _sdc;
 
+public:
+  ESP323248S035C() = delete;
+  ESP323248S035C(V &view):
+    _tpc(view) {}
+  virtual ~ESP323248S035C() {}
+
+  // We must call msecs() for each peripheral so that the time spent servicing
+  // the first peripherals doesn't influence the update frequency of the last.
   template <class ...E>
-  void update(msec_t const now, E... e) {
-    (int[]){ (e->update(now), 0)... };
+  void dispatch(E... e) { (int[]){ (e->update(msecs()), 0)... }; }
+
+  bool init() {
+    // Due to short-circuiting, if any member's init method returns false, the
+    // remaining member init methods are never called.
+    // So be sure the ordering is correct.
+    return
+      _rgb.init() &&
+      _amp.init() &&
+      _cds.init() &&
+      _tpc.init() &&
+      _sdc.init() ;
   }
+
+  void updateAll() { update(); }
+
+  void update(msec_t const now = msecs()) {
+    dispatch(&_sdc, &_cds, &_rgb, &_tpc, &_amp);
+  }
+
+  inline TPC_LCD & tpc() { return _tpc; }
+  inline RGB_PWM & rgb() { return _rgb; }
+  inline AMP_PWM & amp() { return _amp; }
+  inline CDS_ADC & cds() { return _cds; }
+  inline SDC_SPI & sdc() { return _sdc; }
 };
 
 #endif // ESP323248S035_h
