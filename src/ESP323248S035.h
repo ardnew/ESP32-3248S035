@@ -15,20 +15,54 @@
 
 #include "debug.hpp"
 
-typedef std::chrono::duration<uint32_t, std::milli> msec_t; // milliseconds
+// The standard unit of time used herein is msec_t (milliseconds).
+// Use method count() to obtain the value in its underlying type (uint32_t).
+typedef std::chrono::duration<uint32_t, std::milli> msec_t;
 inline msec_t msecs() { return msec_t{millis()}; }
 
-// Function govern uses the FreeRTOS API call vTaskDelayUntil to implement
-// periodic functions with very precise and accurate cycle durations.
+// The sole template parameter msec_t N defines the frequency (miilliseconds)
+// of which the given function func is called.
+//
+// Note that func is not required to run in the same, fixed time duration every
+// iteration. The intervening delay before func is called again will be recalcu-
+// lated to ensure consistent frequency (this is the purpose and responsibility
+// of FreeRTOS function xTaskDelayUntil).
+//
+// The only constraint on N is that it is greater than the maximum _possible_
+// duration of func. Macro TASK_SCHED_GREEDY configures the behavior when this
+// constraint is not met:
+//
+//   If func takes longer than N milliseconds and:
+//     Defined(TASK_SCHED_GREEDY):
+//       The subsequent func is invoked immediately without delay.
+//       If this condition continues, it will starve the IDLE task and trigger
+//       the watchdog timer to reset the system. This will ensure func runs as
+//       frequently as possible, but it might cause system resets.
+//     NotDefined(TASK_SCHED_GREEDY):
+//       The subsequent func is deferred to the following period.
+//       This means the func whose deadline was missed will never execute, which
+//       reduces the frequency of func but gives the IDLE task more opportunity
+//       to run and reset the watchdog timer.
+//       This behavior should improve system stability.
+//       Therefore, it is the default.
+//
 template <const uint32_t N>
 void govern(std::function<void(void)> func) {
-  // Convert type of template parameter N from milliseconds to processor ticks
-  // per FreeRTOS API function vTaskDelayUntil.
+  // xTaskDelayUntil arguments are expressed in units of system "ticks".
+  // Conventionally, 1 tick = 1 millisecond regardless of CPU frequency.
   static constexpr TickType_t freq = N / portTICK_PERIOD_MS;
   TickType_t last = xTaskGetTickCount();
   for (;;) {
+#ifdef TASK_SCHED_GREEDY
+    // vTaskDelayUntil is an older function that does not return a value.
+    // It was replaced with xTaskDelayUntil but still exists for compat.
+    // This function does not provide a way to determine if the task was
+    // actually delayed or not.
     vTaskDelayUntil(&last, freq);
-    func();
+#else
+    if (xTaskDelayUntil(&last, freq))
+#endif
+    { func(); }
   }
 }
 
@@ -416,9 +450,9 @@ protected:
   SDC_SPI _sdc;
 
 public:
-  ESP323248S035C() = delete;
-  ESP323248S035C(V &view):
-    _tpc(view) {}
+  ESP323248S035C(V &view): _tpc(view) {}
+  // ESP323248S035C(V &&view):
+
   virtual ~ESP323248S035C() {}
 
   // We must call msecs() for each peripheral so that the time spent servicing
@@ -437,8 +471,6 @@ public:
       _tpc.init() &&
       _sdc.init() ;
   }
-
-  void updateAll() { update(); }
 
   void update(msec_t const now = msecs()) {
     dispatch(&_sdc, &_cds, &_rgb, &_tpc, &_amp);

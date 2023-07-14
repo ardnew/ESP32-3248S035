@@ -81,9 +81,11 @@ bool TPC_LCD::init() {
     Callback<void(lv_indev_drv_t *, lv_indev_data_t *)>::callback);
   _inpt = lv_indev_drv_register(&_idrv);
 
-  _tick.attach_ms(_tft_refresh.count(), static_cast<tick_t>(&TPC_LCD::tick));
+  if ((ok = ok && _view.init(lv_scr_act()))) {
+    _tick.attach_ms(_tft_refresh.count(), static_cast<tick_t>(&TPC_LCD::tick));
+  }
 
-  return ok && _view.init(lv_scr_act());
+  return ok;
 }
 
 void TPC_LCD::update(msec_t const now) {
