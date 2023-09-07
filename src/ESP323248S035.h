@@ -2,25 +2,24 @@
 #define ESP323248S035_h
 
 #include <Arduino.h>
+#include <freertos/FreeRTOS.h>
+#include <freertos/task.h>
+#include <esp_task_wdt.h>
 #include <Ticker.h>
 #include <SPI.h>
 #include <Wire.h>
 #include <lvgl.h>
 #include <StatusLED.h>
+#include <stdint/ticks.h>
 
 #include <stdint.h>
 #include <chrono>
 #include <utility>
 #include <mutex>
 
-#include "debug.hpp"
+#include "callback.hpp"
 
-// The standard unit of time used herein is msec_t (milliseconds).
-// Use method count() to obtain the value in its underlying type (uint32_t).
-typedef std::chrono::duration<uint32_t, std::milli> msec_t;
-inline msec_t msecs() { return msec_t{millis()}; }
-
-// The sole template parameter msec_t N defines the frequency (miilliseconds)
+// The sole template parameter msecu32_t N defines the frequency (miilliseconds)
 // of which the given function func is called.
 //
 // Note that func is not required to run in the same, fixed time duration every
@@ -36,13 +35,13 @@ inline msec_t msecs() { return msec_t{millis()}; }
 //     Defined(TASK_SCHED_GREEDY):
 //       The subsequent func is invoked immediately without delay.
 //       If this condition continues, it will starve the IDLE task and trigger
-//       the watchdog timer to reset the system. This will ensure func runs as
-//       frequently as possible, but it might cause system resets.
+//       the IWDT to reset the system. This will ensure func runs as frequently
+//       as possible, but it might cause system resets.
 //     NotDefined(TASK_SCHED_GREEDY):
 //       The subsequent func is deferred to the following period.
 //       This means the func whose deadline was missed will never execute, which
 //       reduces the frequency of func but gives the IDLE task more opportunity
-//       to run and reset the watchdog timer.
+//       to run and reset the IWDT.
 //       This behavior should improve system stability.
 //       Therefore, it is the default.
 //
@@ -68,27 +67,28 @@ void govern(std::function<void(void)> func) {
 
 typedef int8_t gpin_t;
 
-struct Cyclic {
-  virtual void update(msec_t const) = 0;
+struct Periodic {
+  virtual void update(msecu32_t const) = 0;
 };
 
-struct Periodic: Cyclic {
+struct Controller: Periodic {
   virtual bool init() = 0;
 };
 
-struct View: Cyclic {
+struct View: Periodic {
   virtual bool init(lv_obj_t *) = 0;
   virtual std::string title() = 0;
 };
 
-template <typename T>
-struct Viewable {
-    constexpr static bool check(View *) { return true; }
-    constexpr static bool check(...)    { return false; }
-    enum { value = check(static_cast<T*>(0)) };
-};
-
-class TPC_LCD: public Periodic, public SPIClass, public TwoWire {
+class TPC_LCD: public Controller, public SPIClass, public TwoWire {
+#if (LV_USE_LOG)
+public:
+  // Static declaration requires user to provide a definition in a source file
+  // whenever the LV_USE_LOG macro is defined, and the TPC_LCD::init() method
+  // will always register it with lvgl.
+  typedef void (*Log)(const char *);
+  static const Log log;
+#endif
 protected:
   struct __attribute__((packed)) point_t {
     // attributes of an individual touch event, this structure is repeated
@@ -148,47 +148,44 @@ protected:
   };
 
   // GPIO pins
-  static gpin_t   constexpr _pin_sdi        = 12U; // SPI MISO
-  static gpin_t   constexpr _pin_sdo        = 13U; // SPI MOSI
-  static gpin_t   constexpr _pin_sck        = 14U; // SPI SCLK
-  static gpin_t   constexpr _pin_sel        = 15U; // SPI SS/CS
-  static gpin_t   constexpr _pin_sdc        =  2U; // LCD DC/RS
-  static gpin_t   constexpr _pin_blt        = 27U; // delicious BLT
-  static gpin_t   constexpr _pin_scl        = 32U; // I²C SCL
-  static gpin_t   constexpr _pin_sda        = 33U; // I²C SDA
-  static gpin_t   constexpr _pin_int        = 21U; // TPC INT
-  static gpin_t   constexpr _pin_rst        = 25U; // TPC RST
+  static gpin_t    constexpr _pin_sdi        = 12U; // SPI MISO
+  static gpin_t    constexpr _pin_sdo        = 13U; // SPI MOSI
+  static gpin_t    constexpr _pin_sck        = 14U; // SPI SCLK
+  static gpin_t    constexpr _pin_sel        = 15U; // SPI SS/CS
+  static gpin_t    constexpr _pin_sdc        =  2U; // LCD DC/RS
+  static gpin_t    constexpr _pin_blt        = 27U; // delicious BLT
+  static gpin_t    constexpr _pin_scl        = 32U; // I²C SCL
+  static gpin_t    constexpr _pin_sda        = 33U; // I²C SDA
+  static gpin_t    constexpr _pin_int        = 21U; // TPC INT
+  static gpin_t    constexpr _pin_rst        = 25U; // TPC RST
   // SPI interfaces
-  static uint8_t  constexpr _spi_bus        = 2U;   // HSPI
-  static uint32_t constexpr _bus_freq       = 80000000U; // 80 MHz
-  static uint8_t  constexpr _word_ord       = SPI_MSBFIRST;
-  static uint8_t  constexpr _sig_mode       = SPI_MODE0;
+  static uint8_t   constexpr _spi_bus        = 2U;   // HSPI
+  static uint32_t  constexpr _bus_freq       = 80000000U; // 80 MHz
+  static uint8_t   constexpr _word_ord       = SPI_MSBFIRST;
+  static uint8_t   constexpr _sig_mode       = SPI_MODE0;
   // I²C interfaces
-  static uint8_t  constexpr _i2c_bus        = 1U;   // Wire1
-  static uint8_t  constexpr _dev_addr       = 0x5D; // I²C touch device address
+  static uint8_t   constexpr _i2c_bus        = 1U;   // Wire1
+  static uint8_t   constexpr _dev_addr       = 0x5D; // I²C touch device address
   // Backlight PWM
-  static uint8_t  constexpr _pwm_blt_chan   = 12U;
-  static uint32_t constexpr _pwm_blt_freq   = 5000U; // 5 kHz
-  static uint8_t  constexpr _pwm_blt_bits   = 8U;
-  static uint8_t  constexpr _pwm_blt_hres   = (1U << _pwm_blt_bits) - 1U;
+  static uint8_t   constexpr _pwm_blt_chan   = 12U;
+  static uint32_t  constexpr _pwm_blt_freq   = 5000U; // 5 kHz
+  static uint8_t   constexpr _pwm_blt_bits   = 8U;
+  static uint8_t   constexpr _pwm_blt_hres   = (1U << _pwm_blt_bits) - 1U;
   // TFT configuration
-  static msec_t   constexpr _tft_refresh    = msec_t{10};  // milliseconds
-  static uint16_t constexpr _tft_width      = 320U; // Physical dimensions, does
-  static uint16_t constexpr _tft_height     = 480U; // not consider rotations.
-  static uint8_t  constexpr _tft_depth      = static_cast<uint8_t>(colmod_t::rgb656);
-  static uint8_t  constexpr _tft_subpixel   = static_cast<uint8_t>(madctl_t::rgb);
-  static uint8_t  constexpr _tft_aspect     = static_cast<uint8_t>(madctl_t::wide_inverted);
+  static msecu32_t constexpr _tft_refresh    = msecu32_t{10};  // milliseconds
+  static uint16_t  constexpr _tft_width      = 320U; // Physical dimensions, does
+  static uint16_t  constexpr _tft_height     = 480U; // not consider rotations.
+  static uint8_t   constexpr _tft_depth      = static_cast<uint8_t>(colmod_t::rgb656);
+  static uint8_t   constexpr _tft_subpixel   = static_cast<uint8_t>(madctl_t::rgb);
+  static uint8_t   constexpr _tft_aspect     = static_cast<uint8_t>(madctl_t::wide_inverted);
   // Touch MMIO
-  static uint16_t constexpr _reg_prod_id    = 0x8140; // product ID (byte 1/4)
-  static size_t   constexpr _size_prod_id   = 4U;     // bytes
-  static uint16_t constexpr _reg_stat       = 0x814E; // buffer/track status
-  static uint16_t constexpr _reg_base_point = 0x814F;
-  static size_t   constexpr _touch_max      = 5U; // simultaneous touch points
+  static uint16_t  constexpr _reg_prod_id    = 0x8140; // product ID (byte 1/4)
+  static size_t    constexpr _size_prod_id   = 4U;     // bytes
+  static uint16_t  constexpr _reg_stat       = 0x814E; // buffer/track status
+  static uint16_t  constexpr _reg_base_point = 0x814F;
+  static size_t    constexpr _touch_max      = 5U; // simultaneous touch points
 
-  // lvgl API methods
-#if (LV_USE_LOG)
-  static inline void log(const char *buf) { writef(Serial, "%s", buf); }
-#endif
+
   static inline void tick() { lv_tick_inc(_tft_refresh.count()); }
   void flush(lv_disp_drv_t *drv, const lv_area_t *area, lv_color_t *color);
   void read(lv_indev_drv_t *drv, lv_indev_data_t *data);
@@ -324,12 +321,14 @@ private:
 
 public:
   TPC_LCD() = delete; // display driver must have a root view!
-  explicit TPC_LCD(View &root):
+  explicit TPC_LCD(View &root, Log log = nullptr):
     SPIClass(_spi_bus), TwoWire(_i2c_bus), _view(root) {}
   virtual ~TPC_LCD() {}
 
   bool init() override;
-  void update(msec_t const now) override;
+  void update(msecu32_t const now) override;
+
+  View &view() { return _view; }
 
   template<uint8_t C = _pwm_blt_chan>
   static inline void set_backlight(uint16_t duty) { ledcWrite(C, duty); }
@@ -345,7 +344,7 @@ public:
   }
 };
 
-class RGB_PWM: Periodic, public StatusLED { // RGB 3-pin analog LED
+class RGB_PWM: Controller, public StatusLED { // RGB 3-pin analog LED
 private:
 protected:
   static gpin_t const _pin_r =  4U;
@@ -377,12 +376,12 @@ public:
       });
     }
   bool init() override;
-  void update(msec_t const now) override;
+  void update(msecu32_t const now) override;
 
   void set(lv_color32_t const rgb);
 };
 
-class AMP_PWM: Periodic { // Autio amplifier
+class AMP_PWM: Controller { // Autio amplifier
 private:
   std::mutex _mutx;
 
@@ -391,13 +390,13 @@ protected:
 
 public:
   bool init() override;
-  void update(msec_t const now) override;
+  void update(msecu32_t const now) override;
 
-  void set(uint32_t const hz, msec_t const ms);
+  void set(uint32_t const hz, msecu32_t const ms);
   void mute();
 };
 
-class CDS_ADC: Periodic { // Light sensitive photo-resistor
+class CDS_ADC: Controller { // Light sensitive photo-resistor
 private:
   std::mutex _mutx;
 
@@ -408,12 +407,12 @@ protected:
 
 public:
   bool init() override;
-  void update(msec_t const now) override;
+  void update(msecu32_t const now) override;
 
   int get();
 };
 
-class SDC_SPI: Periodic { // MicroSD card
+class SDC_SPI: Controller { // MicroSD card
 private:
   std::mutex _mutx;
 
@@ -425,62 +424,96 @@ protected:
 
 public:
   bool init() override;
-  void update(msec_t const now) override;
+  void update(msecu32_t const now) override;
 };
 
-class ESP323248S035: Periodic {};
+class ESP323248S035: Controller {};
 
 template <class V>
 class ESP323248S035C: public ESP323248S035 {
-  // You must be careful to not make any lvgl API calls from C's default
-  // constructor, since the library will be initialized after C::C() is called.
-  // Initialization should be performed in View::init(lv_obj_t *).
-  static_assert(Viewable<V>::value);
+  // You must be careful to not make any lvgl API calls from any constructor,
+  // since that library is initialized indirectly via method init(), and the
+  // user can only call init() on a fully constructed object.
+  // UI initialization and layout should be performed in the init(lv_obj_t *)
+  // method of template parameter V, which we verify here derives from View.
+  static_assert(std::is_base_of<View, V>::value,
+    "Template parameter V must derive from View.");
 
 protected:
-  static constexpr msec_t _refresh = msec_t{1};
+  static constexpr msecu32_t _refresh = msecu32_t{20};
 public:
-  static inline constexpr msec_t refresh() { return _refresh; }
+  static inline constexpr msecu32_t refresh() { return _refresh; }
 
-protected:
-  TPC_LCD _tpc;
-  RGB_PWM _rgb;
-  AMP_PWM _amp;
-  CDS_ADC _cds;
-  SDC_SPI _sdc;
+  // All hardware peripherals found on-board, external to the ESP32, that have
+  // class drivers implemented in this library.
+  // This is a singleton class, with a single instance named _hw, which is
+  // instantiated in the outer/parent class's member initializer list.
+  struct hw_t {
+    TPC_LCD tpc;
+    RGB_PWM rgb;
+    AMP_PWM amp;
+    CDS_ADC cds;
+    SDC_SPI sdc;
+    hw_t(V &view): tpc(view) {}
+  } _hw;
+public:
+  // Accessor for members of the hardware peripherals (hw_t) singleton instance.
+  //
+  // Instead of using separate methods for each member, we use a template and
+  // the SFINAE pattern to select the correct member based on class type of the
+  // template argument.
+  //
+  // Note that _hw must be resolved at runtime in the body of a method, not at
+  // compile time in a method's signature (e.g., as default argument).
+  template <class C>
+  inline C & hw() {
+    union {
+      TPC_LCD & cast(hw_t &p, TPC_LCD *) { return p.tpc; }
+      RGB_PWM & cast(hw_t &p, RGB_PWM *) { return p.rgb; }
+      AMP_PWM & cast(hw_t &p, AMP_PWM *) { return p.amp; }
+      CDS_ADC & cast(hw_t &p, CDS_ADC *) { return p.cds; }
+      SDC_SPI & cast(hw_t &p, SDC_SPI *) { return p.sdc; }
+    } u;
+    return u.cast(_hw, static_cast<C *>(0));
+  }
 
 public:
-  ESP323248S035C(V &view): _tpc(view) {}
+  ESP323248S035C() = delete;
+  explicit ESP323248S035C(V &view): _hw(view) {}
   // ESP323248S035C(V &&view):
 
   virtual ~ESP323248S035C() {}
-
-  // We must call msecs() for each peripheral so that the time spent servicing
-  // the first peripherals doesn't influence the update frequency of the last.
-  template <class ...E>
-  void dispatch(E... e) { (int[]){ (e->update(msecs()), 0)... }; }
 
   bool init() {
     // Due to short-circuiting, if any member's init method returns false, the
     // remaining member init methods are never called.
     // So be sure the ordering is correct.
     return
-      _rgb.init() &&
-      _amp.init() &&
-      _cds.init() &&
-      _tpc.init() &&
-      _sdc.init() ;
+      _hw.rgb.init() &&
+      _hw.amp.init() &&
+      _hw.cds.init() &&
+      _hw.tpc.init() &&
+      _hw.sdc.init() ;
   }
 
-  void update(msec_t const now = msecs()) {
-    dispatch(&_sdc, &_cds, &_rgb, &_tpc, &_amp);
+  virtual inline void update(msecu32_t const = msecu32()) override {
+    dispatch(&_hw.sdc, &_hw.cds, &_hw.rgb, &_hw.tpc, &_hw.amp);
   }
 
-  inline TPC_LCD & tpc() { return _tpc; }
-  inline RGB_PWM & rgb() { return _rgb; }
-  inline AMP_PWM & amp() { return _amp; }
-  inline CDS_ADC & cds() { return _cds; }
-  inline SDC_SPI & sdc() { return _sdc; }
+  // This will call msecu32() on each peripheral in the order they are listed
+  // so that the runtime of each peripheral can be calculated correctly:
+  //    |<-- e[0] -->|<-- e[1] -->| ... |<-- e[n] -->|
+  //    ^t[0]        ^t[1]              ^t[n]
+  //
+  // Otherwise, if we were to call msecu32() only once at the beginning, the
+  // update frequency of the peripherals would be skewed:
+  //
+  //   |<-- e[0] -->|
+  //   |<--       e[1]        -->|
+  //     ...
+  //   |<--                   e[n]               -->|
+  template <class ...E>
+  void dispatch(E... e) { (int[]){ (e->update(msecu32()), 0)... }; }
 };
 
 #endif // ESP323248S035_h

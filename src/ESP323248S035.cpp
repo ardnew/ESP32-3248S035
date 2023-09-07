@@ -3,9 +3,6 @@
 #include "callback.hpp"
 
 // lvgl C API functions
-#if (LV_USE_LOG)
-typedef void (*log_t)(const char *);
-#endif
 typedef void (*tick_t)();
 typedef void (*flush_t)(lv_disp_drv_t *, const lv_area_t *, lv_color_t *);
 typedef void (*read_t)(lv_indev_drv_t *, lv_indev_data_t *);
@@ -19,7 +16,7 @@ lv_indev_drv_t      TPC_LCD::_idrv;
 
 bool TPC_LCD::init() {
 #if (LV_USE_LOG)
-  lv_log_register_print_cb(static_cast<log_t>(&TPC_LCD::log));
+  lv_log_register_print_cb(log);
 #endif
 
   lv_init();
@@ -88,7 +85,7 @@ bool TPC_LCD::init() {
   return ok;
 }
 
-void TPC_LCD::update(msec_t const now) {
+void TPC_LCD::update(msecu32_t const now) {
   lv_timer_handler();
   _view.update(now);
 }
@@ -148,7 +145,7 @@ bool RGB_PWM::init() {
   return true;
 }
 
-void RGB_PWM::update(msec_t const now) {
+void RGB_PWM::update(msecu32_t const now) {
   StatusLED::update(now.count());
 }
 
@@ -165,10 +162,10 @@ bool AMP_PWM::init() {
   return true;
 }
 
-void AMP_PWM::update(msec_t const now) {
+void AMP_PWM::update(msecu32_t const now) {
 }
 
-void AMP_PWM::set(uint32_t const hz, msec_t const ms) {
+void AMP_PWM::set(uint32_t const hz, msecu32_t const ms) {
   std::lock_guard<std::mutex> lck(_mutx);
   tone(_pin, hz, ms.count());
 }
@@ -184,7 +181,7 @@ bool CDS_ADC::init() {
   return true;
 }
 
-void CDS_ADC::update(msec_t const now) {
+void CDS_ADC::update(msecu32_t const now) {
 }
 
 int CDS_ADC::get() {
@@ -196,5 +193,5 @@ bool SDC_SPI::init() {
   return true;
 }
 
-void SDC_SPI::update(msec_t const now) {
+void SDC_SPI::update(msecu32_t const now) {
 }
