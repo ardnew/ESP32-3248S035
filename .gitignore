@@ -1,1 +1,7 @@
 **/.vscode/
+
+examples/*/*
+!examples/**/*.{c,cpp,h,hpp}
+!examples/**/Makefile
+
+**/*.o
