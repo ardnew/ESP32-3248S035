@@ -8,7 +8,7 @@
 //   esp32:esp32    2.0.9   https://github.com/espressif/arduino-esp32
 //   lvgl           8.3.7   https://github.com/lvgl/lvgl
 //   StatusLED      0.2.0   https://github.com/ardnew/StatusLED
-//   cronos         0.1.0   https://github.com/ardnew/cronos
+//   cronos         0.1.3   https://github.com/ardnew/cronos
 //
 #include <ESP323248S035.h>
 

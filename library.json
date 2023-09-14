@@ -1,19 +1,25 @@
 {
   "name": "ESP32-3248S035",
   "keywords": "ESP32-3248S035, ESP32-3248S035C, ESP32, ST7796, GT911",
-  "description": "Arduino board support package for Sunton ESP32-3248S035",
+  "description": "Board support package for Sunton ESP32-3248S035",
   "homepage": "https://github.com/ardnew/ESP32-3248S035",
   "license": "MIT",
   "version": "0.1.0",
-  "frameworks": [ "arduino" ],
-  "platforms": [ "espressif32" ],
+  "frameworks": [
+    "arduino"
+  ],
+  "platforms": [
+    "espressif32"
+  ],
   "dependencies": {
-    "BLE": "*",
-    "SPI": "^2.0.0",
-    "Wire": "^2.0.0.",
-    "lvgl/lvgl": "^8.3.4"
+    "ardnew/cronos": "~0.1",
+    "ardnew/StatusLED": "~0.2",
+    "Locoduino/RingBuffer": "~1.0",
+    "lvgl/lvgl": "~8.3"
   },
-  "headers": [ "ESP323248S035.h" ],
+  "headers": [
+    "ESP323248S035.h"
+  ],
   "repository": {
     "type": "git",
     "url": "https://github.com/ardnew/ESP32-3248S035"
