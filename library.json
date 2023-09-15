@@ -4,7 +4,7 @@
   "description": "Board support package for Sunton ESP32-3248S035",
   "homepage": "https://github.com/ardnew/ESP32-3248S035",
   "license": "MIT",
-  "version": "0.1.0",
+  "version": "0.1.2",
   "frameworks": [
     "arduino"
   ],
@@ -12,10 +12,9 @@
     "espressif32"
   ],
   "dependencies": {
-    "ardnew/cronos": "~0.1",
-    "ardnew/StatusLED": "~0.2",
-    "Locoduino/RingBuffer": "~1.0",
-    "lvgl/lvgl": "~8.3"
+    "ardnew/cronos": "^0.1.3",
+    "Locoduino/RingBuffer": "^1.0.4",
+    "lvgl/lvgl": "^8.3.6"
   },
   "headers": [
     "ESP323248S035.h"
