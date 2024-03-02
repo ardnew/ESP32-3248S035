@@ -10,7 +10,7 @@
 #include <freertos/FreeRTOS.h>
 #include <freertos/task.h>
 #include <lvgl.h>
-#include <cronos.h>
+#include <cronos.hpp>
 
 #include <chrono>
 #include <mutex>
