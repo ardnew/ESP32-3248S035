@@ -1,12 +1,23 @@
-#include <ESP323248S035.h>
+#include <ESP323248S035.hpp>
 
 // If using the lvgl logging system (LV_USE_LOG), you must:
 //   1. Define a TPC_LCD::Log function, and
 //   2. Assign it to the static log member of the TPC_LCD class.
 // Both steps are shown here:
 #if (LV_USE_LOG)
-const TPC_LCD::Log TPC_LCD::log = [](const char *message) {
-  Serial.println(message);
+const bsp::TPC_LCD::log_type bsp::TPC_LCD::log = [](lv_log_level_t ll, const char *msg) {
+  static const char *pre[_LV_LOG_LEVEL_NUM] = {
+    "[-] ", // [0] LV_LOG_LEVEL_TRACE
+    "[=] ", // [1] LV_LOG_LEVEL_INFO
+    "[~] ", // [2] LV_LOG_LEVEL_WARN
+    "[!] ", // [3] LV_LOG_LEVEL_ERROR
+    "[+] "  // [4] LV_LOG_LEVEL_USER
+  };
+  unsigned level = static_cast<unsigned>(ll);
+  if (level < LV_LOG_LEVEL_NONE) {
+    Serial.print(pre[level]);
+  }
+  Serial.println(msg);
 };
 #endif
 
@@ -18,7 +29,7 @@ const TPC_LCD::Log TPC_LCD::log = [](const char *message) {
 //
 // NOTE: Do NOT make any lvgl API calls from the View constructor. These must be
 //       performed in the View::init() method.
-class Main: public View {
+class Main: public bsp::View {
 public:
   Main() = default;
   bool init(lv_obj_t *root) override {
@@ -39,7 +50,7 @@ public:
 
 static Main root;
 //static ESP323248S035C target(root); // C++17 can deduce template parameter.
-static ESP323248S035C<Main> target(root); // Pre-C++17 requires explicit type.
+static bsp::ESP323248S035C<Main> target(root); // Pre-C++17 requires explicit type.
 
 // The Arduino API requires a setup() and loop(). These are where you initiate
 // and refresh the GUI elements and all other hardware peripherals.
@@ -47,7 +58,7 @@ void setup() {
   target.init();
   // The individual hardware peripherals can be accessed via template parameter
   // on method hw<T>(), where T is the peripheral type:
-  target.hw<RGB_PWM>().fabulous(0xFF, 5);
+  target.hw<bsp::RGB_PWM>().fabulous(0xFF, 5);
 }
 
 void loop() {
