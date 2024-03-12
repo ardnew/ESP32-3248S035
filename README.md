@@ -1,4 +1,4 @@
-# esp32-3248s035
+# ESP32-3248S035
 
 This repository contains a barebones board support package (BSP) for the Sunton ESP32-3248S035(C) with a minimal API that supports all onboard peripherals:
 
