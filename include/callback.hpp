@@ -15,9 +15,7 @@ struct Callback;
 template <typename Ret, typename... Params>
 struct Callback<Ret(Params...)> {
    template <typename... Args>
-   static Ret callback(Args... args) {
-      return fn(args...);
-   }
+   static Ret callback(Args... args) { return fn(args...); }
    static std::function<Ret(Params...)> fn;
 };
 

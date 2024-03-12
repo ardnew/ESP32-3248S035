@@ -1,11 +1,10 @@
-#ifndef ESP323248S035_h
-#define ESP323248S035_h
+#pragma once
 
 #include <Arduino.h>
 #include <SPI.h>
-#include <StatusLED.h>
-#include <Ticker.h>
 #include <Wire.h>
+#include <Ticker.h>
+#include <StatusLED.h>
 #include <esp_task_wdt.h>
 #include <freertos/FreeRTOS.h>
 #include <freertos/task.h>
@@ -17,7 +16,7 @@
 #include <stdint.h>
 #include <utility>
 
-#include "callback.hpp"
+namespace bsp {
 
 // The sole template parameter msecu32_t N defines the frequency (miilliseconds)
 // of which the given function func is called.
@@ -45,48 +44,38 @@
 //       This behavior should improve system stability.
 //       Therefore, it is the default.
 //
-template <const uint32_t N> void govern(std::function<void(void)> func) {
+template <const uint32_t N> void run(std::function<void(void)> func) {
   // xTaskDelayUntil arguments are expressed in units of system "ticks".
   // Conventionally, 1 tick = 1 millisecond regardless of CPU frequency.
   static constexpr TickType_t freq = N / portTICK_PERIOD_MS;
   TickType_t last = xTaskGetTickCount();
   for (;;) {
-#ifdef TASK_SCHED_GREEDY
-    // vTaskDelayUntil is an older function that does not return a value.
-    // It was replaced with xTaskDelayUntil but still exists for compat.
-    // This function does not provide a way to determine if the task was
-    // actually delayed or not.
-    vTaskDelayUntil(&last, freq);
-#else
-    if (xTaskDelayUntil(&last, freq))
+#ifndef TASK_SCHED_GREEDY
+    if /* conditionally run func() iff time has elapsed */
 #endif
+    (xTaskDelayUntil(&last, freq))
     { func(); }
   }
 }
 
 typedef int8_t gpin_t;
 
-struct Periodic {
-  virtual void update(msecu32_t const) = 0;
-};
-
-struct Controller : Periodic {
-  virtual bool init() = 0;
-};
+struct Periodic { virtual void update(msecu32_t const) = 0; };
+struct Controller: Periodic { virtual bool init() = 0; };
 
 struct View : Periodic {
   virtual bool init(lv_obj_t *) = 0;
   virtual std::string title() = 0;
 };
 
-class TPC_LCD : public Controller, public SPIClass, public TwoWire {
+class TPC_LCD: public Controller, public SPIClass, public TwoWire {
 #if (LV_USE_LOG)
 public:
   // Static declaration requires user to provide a definition in a source file
   // whenever the LV_USE_LOG macro is defined, and the TPC_LCD::init() method
   // will always register it with lvgl.
-  typedef void (*Log)(const char *);
-  static const Log log;
+  using log_type = void (*)(lv_log_level_t, const char *);
+  static const log_type log;
 #endif
 protected:
   struct __attribute__((packed)) point_t {
@@ -107,6 +96,7 @@ protected:
     // 1 pad byte makes 64 bits in (packed) struct
     uint8_t _u8[1]; // Value is irrelevant
   };
+
   enum class cmd_t : uint8_t {
     swreset = 0x01, // Software Reset
     slpin = 0x10,   // Sleep in
@@ -133,14 +123,14 @@ protected:
     rgb = 0x00, // Subpixel rendering: RGB order
     // MADCTL rotation bitmasks
     // We can conveniently translate these bitmasks to unique values 0..3,
-    // andddd preserve the ordering for computing degrees of rotation, as
-    // follows:
-    //    enum: ((mask >> 5) & 3)          degrees: enum * 90
+    // AND preserve the ordering for computing degrees of rotation, as follows:
     tall = my,                    // ((128 >> 5) & 3) * 90 == 0 * 90 =   0°
     wide = mv,                    //  ((32 >> 5) & 3) * 90 == 1 * 90 =  90°
     tall_inverted = mx,           //  ((64 >> 5) & 3) * 90 == 2 * 90 = 180°
     wide_inverted = my | mv | mx, // ((224 >> 5) & 3) * 90 == 3 * 90 = 270°
   };
+  // Like the enum definitions above, these color mode constants are used by
+  // the MIPI TFT init sequence (n.b., unrelated to lvgl (LV_COLOR_*)).
   enum class colmod_t : uint8_t {
     rgb16 = 0x50,
     ctrl16 = 0x05,
@@ -175,10 +165,14 @@ protected:
   static msecu32_t constexpr _tft_refresh = msecu32_t{10}; // milliseconds
   static uint16_t constexpr _tft_width = 320U;  // Physical dimensions, does
   static uint16_t constexpr _tft_height = 480U; // not consider rotations.
-  static uint8_t constexpr _tft_depth = static_cast<uint8_t>(colmod_t::rgb656);
+  static uint8_t constexpr _tft_colmod = static_cast<uint8_t>(colmod_t::rgb656);
+  static uint8_t constexpr _tft_bpp = 16; // bits per pixel
+  static uint8_t constexpr _tft_pxsize = (_tft_bpp + 7U) >> 3U; // bytes
+  static size_t constexpr _tft_bufcount = 2U;
+  static size_t constexpr _tft_bufline = 10U;
+  static size_t constexpr _tft_bufsize = _tft_width * _tft_bufline * _tft_pxsize;
   static uint8_t constexpr _tft_subpixel = static_cast<uint8_t>(madctl_t::rgb);
-  static uint8_t constexpr _tft_aspect =
-      static_cast<uint8_t>(madctl_t::wide_inverted);
+  static uint8_t constexpr _tft_aspect = static_cast<uint8_t>(madctl_t::wide_inverted);
   // Touch MMIO
   static uint16_t constexpr _reg_prod_id = 0x8140; // product ID (byte 1/4)
   static size_t constexpr _size_prod_id = 4U;      // bytes
@@ -187,39 +181,30 @@ protected:
   static size_t constexpr _touch_max = 5U; // simultaneous touch points
 
   static inline void tick() { lv_tick_inc(_tft_refresh.count()); }
-  void flush(lv_disp_drv_t *drv, const lv_area_t *area, lv_color_t *color);
-  void read(lv_indev_drv_t *drv, lv_indev_data_t *data);
+  void flush(lv_display_t *drv, const lv_area_t *area, uint8_t *data);
+  void read(lv_indev_t *drv, lv_indev_data_t *data);
 
-  template <class... E> void tx(cmd_t const code, E... e) {
-    constexpr size_t size = sizeof...(e);
-    uint8_t data[size] = {static_cast<uint8_t>(e)...};
+  void px(cmd_t const code, const uint8_t data[], size_t const size) {
     digitalWrite(_pin_sdc, LOW); // D/C ⇒ command
-    beginTransaction(SPISettings(_bus_freq, _word_ord, _sig_mode));
+    SPIClass::beginTransaction(SPISettings(_bus_freq, _word_ord, _sig_mode));
     digitalWrite(_pin_sel, LOW); // C/S ⇒ enable
     SPIClass::write(static_cast<uint8_t>(code));
     if (size > 0) {
       digitalWrite(_pin_sdc, HIGH); // D/C ⇒ data
-      writeBytes(data, size);
+      SPIClass::writeBytes(data, size);
     }
     digitalWrite(_pin_sel, HIGH); // C/S ⇒ disable
-    endTransaction();
+    SPIClass::endTransaction();
   }
 
-  void px(cmd_t const code, const lv_color_t color[], size_t const count) {
-    digitalWrite(_pin_sdc, LOW); // D/C ⇒ command
-    beginTransaction(SPISettings(_bus_freq, _word_ord, _sig_mode));
-    digitalWrite(_pin_sel, LOW); // C/S ⇒ enable
-    SPIClass::write(static_cast<uint8_t>(code));
-    if (count > 0) {
-      digitalWrite(_pin_sdc, HIGH); // D/C ⇒ data
-      writePixels(color, count * sizeof(lv_color_t));
-    }
-    digitalWrite(_pin_sel, HIGH); // C/S ⇒ disable
-    endTransaction();
+  template <class... E> void tx(cmd_t const code, E... e) {
+    constexpr size_t size = sizeof...(e);
+    uint8_t data[size] = {static_cast<uint8_t>(e)...};
+    px(code, data, size);
   }
 
   inline bool r16(uint16_t const reg) {
-    beginTransmission(_dev_addr);
+    TwoWire::beginTransmission(_dev_addr);
     return TwoWire::write(static_cast<uint8_t>(reg >> 8)) && // MSB (first)
            TwoWire::write(static_cast<uint8_t>(reg & 0xFF)); // LSB
   }
@@ -229,7 +214,7 @@ protected:
     if (r16(reg)) {
       sent = TwoWire::write(buf, len);
     }
-    endTransmission();
+    TwoWire::endTransmission();
     return sent == len;
   }
 
@@ -237,9 +222,9 @@ protected:
     uint8_t *dst = buf;
     size_t rem = 0U;
     bool ok = r16(reg);
-    endTransmission(false);
-    if (ok && (len == (rem = requestFrom(_dev_addr, len)))) {
-      while (available() && rem--) {
+    TwoWire::endTransmission(false);
+    if (ok && (len == (rem = TwoWire::requestFrom(_dev_addr, len)))) {
+      while (TwoWire::available() && rem--) {
         *(dst++) = TwoWire::read();
       }
     }
@@ -304,12 +289,9 @@ protected:
   }
 
 private:
-  static lv_disp_t *_disp;
-  static lv_disp_drv_t _ddrv;
-  static lv_disp_draw_buf_t _draw;
-  static lv_color_t _fb[_tft_width * 10];
-  static lv_indev_t *_inpt;
-  static lv_indev_drv_t _idrv;
+  static inline lv_display_t *_disp;
+  static inline lv_indev_t *_inpt;
+  static inline uint8_t _fb[_tft_bufcount][_tft_bufsize] __attribute__((aligned(4)));
 
   std::mutex _mutx;
 
@@ -318,7 +300,7 @@ private:
 
 public:
   TPC_LCD() = delete; // display driver must have a root view!
-  explicit TPC_LCD(View &root, Log log = nullptr)
+  explicit TPC_LCD(View &root, log_type log = nullptr)
       : SPIClass(_spi_bus), TwoWire(_i2c_bus), _view(root) {}
   virtual ~TPC_LCD() {}
 
@@ -328,17 +310,22 @@ public:
   View &view() { return _view; }
 
   template <uint8_t C = _pwm_blt_chan>
-  static inline void set_backlight(uint16_t duty) {
+  static void set_backlight(uint16_t duty) {
     ledcWrite(C, duty);
   }
 
-  static inline constexpr bool wide() {
+  static constexpr size_t depth(void) noexcept { return _tft_bpp; }
+  static constexpr size_t pxsize(void) noexcept { return _tft_pxsize; }
+  static constexpr size_t size(void) noexcept { return _tft_bufsize; }
+  static constexpr size_t buffers(void) noexcept { return _tft_bufcount; }
+
+  static constexpr size_t wide(void) noexcept {
     return (_tft_aspect & static_cast<uint8_t>(madctl_t::mv)) > 0; // transpose?
   }
-  static inline constexpr uint16_t width() {
+  static constexpr size_t width(void) noexcept {
     return wide() ? _tft_height : _tft_width;
   }
-  static inline constexpr uint16_t height() {
+  static constexpr size_t height(void) noexcept {
     return wide() ? _tft_width : _tft_height;
   }
 };
@@ -368,8 +355,11 @@ public:
     setWrite([&](SRGB const &rgb) {
       // write() always clips its actual argument's components to 8-bits,
       // so there is no narrowing happening in these typecasts.
-      set(LV_COLOR_MAKE32((uint8_t)rgb.red, (uint8_t)rgb.green,
-                          (uint8_t)rgb.blue));
+      set(LV_COLOR_MAKE(
+        static_cast<uint8_t>(rgb.red),
+        static_cast<uint8_t>(rgb.green),
+        static_cast<uint8_t>(rgb.blue)
+      ));
     });
   }
   bool init() override;
@@ -509,4 +499,4 @@ public:
   }
 };
 
-#endif // ESP323248S035_h
+} // namespace bsp

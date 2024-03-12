@@ -1,18 +1,12 @@
-#include "ESP323248S035.h"
-
+#include "ESP323248S035.hpp"
 #include "callback.hpp"
+
+namespace bsp {
 
 // lvgl C API functions
 typedef void (*tick_t)();
-typedef void (*flush_t)(lv_disp_drv_t *, const lv_area_t *, lv_color_t *);
-typedef void (*read_t)(lv_indev_drv_t *, lv_indev_data_t *);
-
-lv_disp_t          *TPC_LCD::_disp;
-lv_disp_drv_t       TPC_LCD::_ddrv;
-lv_disp_draw_buf_t  TPC_LCD::_draw;
-lv_color_t          TPC_LCD::_fb[TPC_LCD::_tft_width * 10];
-lv_indev_t         *TPC_LCD::_inpt;
-lv_indev_drv_t      TPC_LCD::_idrv;
+typedef void (*flush_t)(lv_display_t *, const lv_area_t *, uint8_t *);
+typedef void (*read_t)(lv_indev_t *, lv_indev_data_t *);
 
 bool TPC_LCD::init() {
 #if (LV_USE_LOG)
@@ -35,7 +29,7 @@ bool TPC_LCD::init() {
   delay(100);
   tx(cmd_t::cscon, 0xC3); // Enable extension command 2 part I
   tx(cmd_t::cscon, 0x96); // Enable extension command 2 part II
-  tx(cmd_t::colmod, _tft_depth); // 16 bits R5G6B5
+  tx(cmd_t::colmod, _tft_colmod); // 16 bits R5G6B5
   tx(cmd_t::madctl, _tft_aspect | _tft_subpixel);
   tx(cmd_t::pgc, 0xF0, 0x09, 0x0B, 0x06, 0x04, 0x15, 0x2F, 0x54, 0x42, 0x3C, 0x17, 0x14, 0x18, 0x1B);
   tx(cmd_t::ngc, 0xE0, 0x09, 0x0B, 0x06, 0x04, 0x03, 0x2B, 0x43, 0x42, 0x3B, 0x16, 0x14, 0x17, 0x1B);
@@ -48,35 +42,32 @@ bool TPC_LCD::init() {
 
   set_backlight(_pwm_blt_hres);
 
-  lv_disp_draw_buf_init(&_draw, _fb, NULL, _tft_width * 10);
-  lv_disp_drv_init(&_ddrv);
-  _ddrv.hor_res = width();
-  _ddrv.ver_res = height();
-  Callback<void(lv_disp_drv_t *, const lv_area_t *, lv_color_t *)>::fn =
+  _disp = lv_display_create(TPC_LCD::width(), TPC_LCD::height());
+  Callback<void(lv_display_t *, const lv_area_t *, uint8_t *)>::fn =
     std::bind(&TPC_LCD::flush, this,
     std::placeholders::_1, std::placeholders::_2, std::placeholders::_3);
-  _ddrv.flush_cb = static_cast<flush_t>(
-    Callback<void(lv_disp_drv_t *, const lv_area_t *, lv_color_t *)>::callback);
-  _ddrv.draw_buf = &_draw;
-  _disp = lv_disp_drv_register(&_ddrv);
-
+  lv_display_set_flush_cb(_disp, static_cast<flush_t>(
+    Callback<void(lv_display_t *, const lv_area_t *, uint8_t *)>::callback));
+  lv_display_set_buffers(_disp, _fb[0], _fb[1], size(), LV_DISPLAY_RENDER_MODE_PARTIAL);
   lv_obj_clean(lv_scr_act());
 
-  // TODO: calibrate touch?
+  // ---------------------------------------------------------------------------
+  //  TODO: calibrate touch?
+  // ---------------------------------------------------------------------------
+
   bool ok;
   if ((ok = TwoWire::begin(_pin_sda, _pin_scl))) {
     static uint8_t pid[_size_prod_id];
     ok = rx(_reg_prod_id, pid, sizeof(pid));
   }
 
-  lv_indev_drv_init(&_idrv);
-  _idrv.type = LV_INDEV_TYPE_POINTER;
-  Callback<void(lv_indev_drv_t *, lv_indev_data_t *)>::fn =
+  _inpt = lv_indev_create();
+  Callback<void(lv_indev_t *, lv_indev_data_t *)>::fn =
     std::bind(&TPC_LCD::read, this,
     std::placeholders::_1, std::placeholders::_2);
-  _idrv.read_cb = static_cast<read_t>(
-    Callback<void(lv_indev_drv_t *, lv_indev_data_t *)>::callback);
-  _inpt = lv_indev_drv_register(&_idrv);
+  lv_indev_set_type(_inpt, LV_INDEV_TYPE_POINTER);
+  lv_indev_set_read_cb(_inpt, static_cast<read_t>(
+    Callback<void(lv_indev_t *, lv_indev_data_t *)>::callback));
 
   if ((ok = ok && _view.init(lv_scr_act()))) {
     _tick.attach_ms(_tft_refresh.count(), static_cast<tick_t>(&TPC_LCD::tick));
@@ -90,7 +81,9 @@ void TPC_LCD::update(msecu32_t const now) {
   _view.update(now);
 }
 
-void TPC_LCD::flush(lv_disp_drv_t *drv, const lv_area_t *area, lv_color_t *color) {
+void TPC_LCD::flush(lv_display_t *disp, const lv_area_t *area, uint8_t *data) {
+//  uint32_t w = lv_area_get_width(area);
+//  uint32_t h = lv_area_get_height(area);
   tx(cmd_t::caset,
     static_cast<uint8_t>(area->x1 >> 8),
     static_cast<uint8_t>(area->x1),
@@ -101,11 +94,13 @@ void TPC_LCD::flush(lv_disp_drv_t *drv, const lv_area_t *area, lv_color_t *color
     static_cast<uint8_t>(area->y1),
     static_cast<uint8_t>(area->y2 >> 8),
     static_cast<uint8_t>(area->y2));
-  px(cmd_t::ramwr, color, lv_area_get_width(area) * lv_area_get_height(area));
-  lv_disp_flush_ready(drv);
+
+
+  px(cmd_t::ramwr, data, lv_area_get_size(area) * TPC_LCD::pxsize());
+  lv_display_flush_ready(disp);
 }
 
-void TPC_LCD::read(lv_indev_drv_t *drv, lv_indev_data_t *data) {
+void TPC_LCD::read(lv_indev_t *inpt, lv_indev_data_t *data) {
   static int16_t _x = 0, _y = 0;
   point_t pt;
   switch (touch_count()) {
@@ -151,9 +146,9 @@ void RGB_PWM::update(msecu32_t const now) {
 
 void RGB_PWM::set(lv_color32_t const rgb) {
   std::lock_guard<std::mutex> lck(_mutx);
-  ledcWrite(_pwm_r_chan, _pwm_hres - rgb.ch.red);
-  ledcWrite(_pwm_g_chan, _pwm_hres - rgb.ch.green);
-  ledcWrite(_pwm_b_chan, _pwm_hres - rgb.ch.blue);
+  ledcWrite(_pwm_r_chan, _pwm_hres - rgb.red);
+  ledcWrite(_pwm_g_chan, _pwm_hres - rgb.green);
+  ledcWrite(_pwm_b_chan, _pwm_hres - rgb.blue);
 }
 
 bool AMP_PWM::init() {
@@ -195,3 +190,5 @@ bool SDC_SPI::init() {
 
 void SDC_SPI::update(msecu32_t const now) {
 }
+
+} // namespace bsp
