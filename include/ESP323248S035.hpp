@@ -168,7 +168,7 @@ protected:
   static uint8_t constexpr _tft_colmod = static_cast<uint8_t>(colmod_t::rgb656);
   static uint8_t constexpr _tft_bpp = 16; // bits per pixel
   static uint8_t constexpr _tft_pxsize = (_tft_bpp + 7U) >> 3U; // bytes
-  static size_t constexpr _tft_bufcount = 1U;
+  static size_t constexpr _tft_bufcount = 2U;
   static size_t constexpr _tft_bufline = 10U;
   static size_t constexpr _tft_bufsize = _tft_width * _tft_bufline * _tft_pxsize;
   static uint8_t constexpr _tft_subpixel = static_cast<uint8_t>(madctl_t::rgb);
@@ -289,6 +289,10 @@ protected:
   }
 
 private:
+  static inline lv_display_t *_disp;
+  static inline lv_indev_t *_inpt;
+  static inline uint8_t _fb[_tft_bufcount][_tft_bufsize] __attribute__((aligned(4)));
+
   std::mutex _mutx;
 
   Ticker _tick;
@@ -324,11 +328,6 @@ public:
   static constexpr size_t height(void) noexcept {
     return wide() ? _tft_width : _tft_height;
   }
-
-private:
-  static inline lv_display_t *_disp = lv_display_create(TPC_LCD::width(), TPC_LCD::height());
-  static inline lv_indev_t *_inpt = lv_indev_create();
-  static inline lv_color_t _fb[_tft_bufcount][_tft_bufsize]{};
 };
 
 class RGB_PWM : Controller, public StatusLED { // RGB 3-pin analog LED

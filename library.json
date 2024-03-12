@@ -24,7 +24,7 @@
       "-std=gnu++17",
       "-DLV_CONF_INCLUDE_SIMPLE=1",
       "-DLV_CONF_SKIP=1",
-      "-DLV_COLOR_DEPTH=32"
+      "-DLV_COLOR_DEPTH=16"
     ]
   },
   "repository": {

@@ -42,6 +42,7 @@ bool TPC_LCD::init() {
 
   set_backlight(_pwm_blt_hres);
 
+  _disp = lv_display_create(TPC_LCD::width(), TPC_LCD::height());
   Callback<void(lv_display_t *, const lv_area_t *, uint8_t *)>::fn =
     std::bind(&TPC_LCD::flush, this,
     std::placeholders::_1, std::placeholders::_2, std::placeholders::_3);
@@ -60,6 +61,7 @@ bool TPC_LCD::init() {
     ok = rx(_reg_prod_id, pid, sizeof(pid));
   }
 
+  _inpt = lv_indev_create();
   Callback<void(lv_indev_t *, lv_indev_data_t *)>::fn =
     std::bind(&TPC_LCD::read, this,
     std::placeholders::_1, std::placeholders::_2);
@@ -92,8 +94,9 @@ void TPC_LCD::flush(lv_display_t *disp, const lv_area_t *area, uint8_t *data) {
     static_cast<uint8_t>(area->y1),
     static_cast<uint8_t>(area->y2 >> 8),
     static_cast<uint8_t>(area->y2));
-  px(cmd_t::ramwr, data,
-    lv_area_get_width(area) * lv_area_get_height(area) * TPC_LCD::pxsize());
+
+
+  px(cmd_t::ramwr, data, lv_area_get_size(area) * TPC_LCD::pxsize());
   lv_display_flush_ready(disp);
 }
 
