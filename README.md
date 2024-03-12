@@ -2,7 +2,8 @@
 
 This repository contains a barebones board support package (BSP) for the Sunton ESP32-3248S035(C) with a minimal API that supports all onboard peripherals:
 
-|:Peripheral:|:Interface:|
+|Peripheral|Interface|
+|:--------:|:--------|
 |LCD (ST7796)|SPI|
 |Capacitive touch (GT911)|I²C|
 |Audio amplifier|PWM|
