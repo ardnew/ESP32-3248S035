@@ -1,19 +1,21 @@
 #pragma once
 
+// ESP32 Arduino core
 #include <Arduino.h>
 #include <SPI.h>
 #include <Wire.h>
-#include <Ticker.h>
-#include <StatusLED.h>
-#include <esp_task_wdt.h>
+// IDF/FreeRTOS
 #include <freertos/FreeRTOS.h>
 #include <freertos/task.h>
-#include <lvgl.h>
-#include <cronos.hpp>
-
+#include <esp_task_wdt.h>
+// 3rd-party libraries
+#include <lvgl.h>      // LCD/Touch
+#include <cronos.hpp>  // std::chrono native wrapper
+#include <Ticker.h>
+// C++ Standard Library
 #include <chrono>
+#include <cstdint>
 #include <mutex>
-#include <stdint.h>
 #include <utility>
 
 namespace bsp {
@@ -186,15 +188,25 @@ protected:
 
   void px(cmd_t const code, const uint8_t data[], size_t const size) {
     digitalWrite(_pin_sdc, LOW); // D/C ⇒ command
-    SPIClass::beginTransaction(SPISettings(_bus_freq, _word_ord, _sig_mode));
+    {
+      // std::lock_guard<std::mutex> lck(_mutx);
+      SPIClass::beginTransaction(SPISettings(_bus_freq, _word_ord, _sig_mode));
+    }
     digitalWrite(_pin_sel, LOW); // C/S ⇒ enable
-    SPIClass::write(static_cast<uint8_t>(code));
+    {
+      // std::lock_guard<std::mutex> lck(_mutx);
+      SPIClass::write(static_cast<uint8_t>(code));
+    }
     if (size > 0) {
       digitalWrite(_pin_sdc, HIGH); // D/C ⇒ data
+      // std::lock_guard<std::mutex> lck(_mutx);
       SPIClass::writeBytes(data, size);
     }
     digitalWrite(_pin_sel, HIGH); // C/S ⇒ disable
-    SPIClass::endTransaction();
+    {
+      // std::lock_guard<std::mutex> lck(_mutx);
+      SPIClass::endTransaction();
+    }
   }
 
   template <class... E> void tx(cmd_t const code, E... e) {
@@ -235,42 +247,38 @@ protected:
     return rx(reg, (uint8_t *)buf, len);
   }
 
-  // template <unsigned N = 0>
-  // static inline constexpr uint16_t track() {
-  //   return _reg_base_point + N * sizeof(point_t) + offsetof(point_t, track);
-  // }
-
   template <uint16_t R = _tft_aspect>
   inline bool map(point_t *const pt, size_t count) {
     bool ok = rx(_reg_base_point, pt, sizeof(point_t) * count);
-    ((std::function<void()>[]){[pt, count]() {
-                                 for (uint8_t i = 0; i < count; ++i) {
-                                   pt[i].x = width() - pt[i].x;
-                                   pt[i].y = height() - pt[i].y;
-                                 }
-                               },
-                               [pt, count]() {
-                                 uint16_t swap;
-                                 for (uint8_t i = 0; i < count; ++i) {
-                                   swap = pt[i].x;
-                                   pt[i].x = pt[i].y;
-                                   pt[i].y = height() - swap;
-                                 }
-                               },
-                               [pt, count]() {
-                                 for (uint8_t i = 0; i < count; ++i) {
-                                   pt[i].x = pt[i].x;
-                                   pt[i].y = pt[i].y;
-                                 }
-                               },
-                               [pt, count]() {
-                                 uint16_t swap;
-                                 for (uint8_t i = 0; i < count; ++i) {
-                                   swap = pt[i].x;
-                                   pt[i].x = width() - pt[i].y;
-                                   pt[i].y = swap;
-                                 }
-                               }}[(R >> 5) & 3])();
+    ((std::function<void()>[]){
+      [pt, count]() {
+        for (uint8_t i = 0; i < count; ++i) {
+          pt[i].x = width() - pt[i].x;
+          pt[i].y = height() - pt[i].y;
+        }
+      },
+      [pt, count]() {
+        uint16_t swap;
+        for (uint8_t i = 0; i < count; ++i) {
+          swap = pt[i].x;
+          pt[i].x = pt[i].y;
+          pt[i].y = height() - swap;
+        }
+      },
+      [pt, count]() {
+        for (uint8_t i = 0; i < count; ++i) {
+          pt[i].x = pt[i].x;
+          pt[i].y = pt[i].y;
+        }
+      },
+      [pt, count]() {
+        uint16_t swap;
+        for (uint8_t i = 0; i < count; ++i) {
+          swap = pt[i].x;
+          pt[i].x = width() - pt[i].y;
+          pt[i].y = swap;
+        }
+      }}[(R >> 5) & 3])();
     return ok;
   }
 
@@ -294,9 +302,8 @@ private:
   static inline uint8_t _fb[_tft_bufcount][_tft_bufsize] __attribute__((aligned(4)));
 
   std::mutex _mutx;
-
-  Ticker _tick;
   View &_view;
+  Ticker _tick;
 
 public:
   TPC_LCD() = delete; // display driver must have a root view!
@@ -330,7 +337,7 @@ public:
   }
 };
 
-class RGB_PWM : Controller, public StatusLED { // RGB 3-pin analog LED
+class RGB_PWM : Controller { // RGB 3-pin analog LED
 private:
 protected:
   static gpin_t const _pin_r = 4U;
@@ -347,25 +354,14 @@ protected:
 
 private:
   std::mutex _mutx;
+  lv_color32_t _rgb, _set; // _rgb is last set value, _set is buffer for next
 
 public:
-  RGB_PWM()
-      : StatusLED(_pin_r, _pin_g, _pin_b, HIGH, StatusLEDMode::Fixed, 100U,
-                  true, COLOR_RED, 0x3F) {
-    setWrite([&](SRGB const &rgb) {
-      // write() always clips its actual argument's components to 8-bits,
-      // so there is no narrowing happening in these typecasts.
-      set(LV_COLOR_MAKE(
-        static_cast<uint8_t>(rgb.red),
-        static_cast<uint8_t>(rgb.green),
-        static_cast<uint8_t>(rgb.blue)
-      ));
-    });
-  }
   bool init() override;
   void update(msecu32_t const now) override;
 
-  void set(lv_color32_t const rgb);
+  lv_color32_t get(void);
+  lv_color32_t set(const lv_color32_t &rgb);
 };
 
 class AMP_PWM : Controller { // Autio amplifier

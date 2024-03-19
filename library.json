@@ -13,8 +13,7 @@
   ],
   "dependencies": {
     "ardnew/cronos": "^0.1.6",
-    "ardnew/StatusLED": "https://github.com/ardnew/StatusLED#0.2.0",
-    "lvgl/lvgl": "@9"
+    "lvgl/lvgl": "^9"
   },
   "headers": [
     "ESP323248S035.hpp"

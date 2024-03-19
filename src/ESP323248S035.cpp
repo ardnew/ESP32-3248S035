@@ -120,35 +120,48 @@ void TPC_LCD::read(lv_indev_t *inpt, lv_indev_data_t *data) {
 }
 
 bool RGB_PWM::init() {
-  std::lock_guard<std::mutex> lck(_mutx);
-  // Red
-  pinMode(_pin_r, OUTPUT);
-  digitalWrite(_pin_r, true);
-  ledcSetup(_pwm_r_chan, _pwm_freq, _pwm_bits);
-  ledcAttachPin(_pin_r, _pwm_r_chan);
-  // Green
-  pinMode(_pin_g, OUTPUT);
-  digitalWrite(_pin_g, true);
-  ledcSetup(_pwm_g_chan, _pwm_freq, _pwm_bits);
-  ledcAttachPin(_pin_g, _pwm_g_chan);
-  // Blue
-  pinMode(_pin_b, OUTPUT);
-  digitalWrite(_pin_b, true);
-  ledcSetup(_pwm_b_chan, _pwm_freq, _pwm_bits);
-  ledcAttachPin(_pin_b, _pwm_b_chan);
-
+  {
+    std::lock_guard<std::mutex> lck(_mutx);
+    // Red
+    pinMode(_pin_r, OUTPUT);
+    digitalWrite(_pin_r, true);
+    ledcSetup(_pwm_r_chan, _pwm_freq, _pwm_bits);
+    ledcAttachPin(_pin_r, _pwm_r_chan);
+    // Green
+    pinMode(_pin_g, OUTPUT);
+    digitalWrite(_pin_g, true);
+    ledcSetup(_pwm_g_chan, _pwm_freq, _pwm_bits);
+    ledcAttachPin(_pin_g, _pwm_g_chan);
+    // Blue
+    pinMode(_pin_b, OUTPUT);
+    digitalWrite(_pin_b, true);
+    ledcSetup(_pwm_b_chan, _pwm_freq, _pwm_bits);
+    ledcAttachPin(_pin_b, _pwm_b_chan);
+  }
+  _rgb = { 1, 1, 1 };
+  _set = { 0, 0, 0 };
   return true;
 }
 
 void RGB_PWM::update(msecu32_t const now) {
-  StatusLED::update(now.count());
+  std::lock_guard<std::mutex> lck(_mutx);
+  if (!lv_color32_eq(_rgb, _set)) {
+    _rgb = _set;
+    ledcWrite(_pwm_r_chan, _pwm_hres - _rgb.red);
+    ledcWrite(_pwm_g_chan, _pwm_hres - _rgb.green);
+    ledcWrite(_pwm_b_chan, _pwm_hres - _rgb.blue);
+  }
 }
 
-void RGB_PWM::set(lv_color32_t const rgb) {
+lv_color32_t RGB_PWM::get(void) {
   std::lock_guard<std::mutex> lck(_mutx);
-  ledcWrite(_pwm_r_chan, _pwm_hres - rgb.red);
-  ledcWrite(_pwm_g_chan, _pwm_hres - rgb.green);
-  ledcWrite(_pwm_b_chan, _pwm_hres - rgb.blue);
+  return _rgb;
+}
+
+lv_color32_t RGB_PWM::set(const lv_color32_t &rgb) {
+  std::lock_guard<std::mutex> lck(_mutx);
+  _set = rgb;
+  return _set;
 }
 
 bool AMP_PWM::init() {

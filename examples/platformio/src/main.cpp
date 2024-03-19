@@ -46,22 +46,62 @@ public:
     // Update any subviews here.
   }
   inline std::string title() override { return "Main"; }
+
+  uint8_t wheel(lv_color32_t &rgb, uint8_t const i, int8_t const step = 1) {
+    uint8_t curr = i;
+    uint8_t next = i + step;
+    curr = 0xFF - curr;
+    if (curr < 0x55) {
+      rgb.red   = 0x03 * curr;
+      rgb.green = 0xFF - curr * 0x03;
+      rgb.blue  = 0x00;
+    }
+    else if (curr < 0xAA) {
+      curr -= 0x55;
+      rgb.red   = 0xFF - curr * 0x03;
+      rgb.green = 0x00;
+      rgb.blue  = 0x03 * curr;
+    }
+    else {
+      curr -= 0xAA;
+      rgb.red   = 0x00;
+      rgb.green = 0x03 * curr;
+      rgb.blue  = 0xFF - curr * 0x03;
+    }
+    return next;
+  }
 };
 
 static Main root;
-//static ESP323248S035C target(root); // C++17 can deduce template parameter.
+// static ESP323248S035C target(root); // C++17 can deduce template parameter.
 static bsp::ESP323248S035C<Main> target(root); // Pre-C++17 requires explicit type.
+
+template <typename T = msecu32_t::rep, T Freq = 2000>
+bool can_refresh(T const now = msecu32().count()) {
+  if constexpr (Freq != 0) {
+    static T last = 0;
+    if (now - last < Freq) {
+      return false;
+    }
+    last = now;
+  }
+  return true;
+}
 
 // The Arduino API requires a setup() and loop(). These are where you initiate
 // and refresh the GUI elements and all other hardware peripherals.
 void setup() {
   target.init();
-  // The individual hardware peripherals can be accessed via template parameter
-  // on method hw<T>(), where T is the peripheral type:
-  target.hw<bsp::RGB_PWM>().fabulous(0xFF, 5);
 }
 
 void loop() {
-  target.update();
-  delay(2);
+  static uint8_t i_wheel = 0;
+  if (can_refresh()) {
+    // The individual hardware peripherals can be accessed via template
+    // parameter on method hw<T>(), where T is the peripheral type:
+    lv_color32_t rgb = target.hw<bsp::RGB_PWM>().get();
+    i_wheel = root.wheel(rgb, i_wheel);
+    target.hw<bsp::RGB_PWM>().set(rgb);
+    target.update();
+  }
 }
