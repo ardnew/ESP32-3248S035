@@ -1,19 +1,21 @@
 #pragma once
 
+// Arduino-ESP32 core
 #include <Arduino.h>
 #include <SPI.h>
 #include <Wire.h>
 #include <Ticker.h>
-#include <StatusLED.h>
+// ESP-IDF SDK
 #include <esp_task_wdt.h>
 #include <freertos/FreeRTOS.h>
 #include <freertos/task.h>
+// External libraries
 #include <lvgl.h>
 #include <cronos.hpp>
-
+// C++ stdlib
 #include <chrono>
 #include <mutex>
-#include <stdint.h>
+#include <cstddef>
 #include <utility>
 
 namespace bsp {
@@ -58,7 +60,18 @@ template <const uint32_t N> void run(std::function<void(void)> func) {
   }
 }
 
-typedef int8_t gpin_t;
+using pin_type = int8_t;
+
+// Atomic provides a mutual exclusion mechanism for shared resources.
+template <typename MutexType = std::mutex,
+  typename GuardType = std::unique_lock<MutexType>>
+struct Atomic: MutexType {
+  using type = Atomic;
+  using mutex_type = MutexType;
+  using guard_type = GuardType;
+  // Take ownership of this mutex until the returned value is destroyed.
+  virtual inline guard_type make() { return guard_type(*this); }
+};
 
 struct Periodic { virtual void update(msecu32_t const) = 0; };
 struct Controller: Periodic { virtual bool init() = 0; };
@@ -68,15 +81,54 @@ struct View : Periodic {
   virtual std::string title() = 0;
 };
 
-class TPC_LCD: public Controller, public SPIClass, public TwoWire {
-#if (LV_USE_LOG)
+template <typename T = SPIClass> struct SPIImpl;
+template <> struct SPIImpl<SPIClass> : SPIClass {
+  using type = SPIClass;
+  using type::type;
+  inline bool init() { type::begin(); return true; }
+};
+
+template <typename T = TwoWire> struct I2CImpl;
+template <> struct I2CImpl<TwoWire> : TwoWire {
+  using type = TwoWire;
+  using type::type;
+  inline bool init() { return type::begin(); }
+};
+
+template <typename AtomicType = Atomic<>,
+  typename SPIType = SPIImpl<>, typename I2CType = I2CImpl<>>
+class TPC_LCD: public Controller, AtomicType, SPIType, I2CType {
 public:
-  // Static declaration requires user to provide a definition in a source file
-  // whenever the LV_USE_LOG macro is defined, and the TPC_LCD::init() method
-  // will always register it with lvgl.
-  using log_type = void (*)(lv_log_level_t, const char *);
+  using type        = TPC_LCD;
+  using atomic_type = AtomicType;
+  using spi_type    = SPIType;
+  using i2c_type    = I2CType;
+
+  // C callback signatures required by lvgl
+  //  (note: omit tick() because it's a static method we can use directly)
+  struct Callback {
+    using log_type = void (*)(lv_log_level_t, const char *);
+    using flush_type = void (*)(lv_display_t *, const lv_area_t *, uint8_t *);
+    using read_type = void (*)(lv_indev_t *, lv_indev_data_t *);
+    inline static type *instance; // must be public for access from C context
+    static void flush(lv_display_t *disp, const lv_area_t *area, uint8_t *data) {
+      instance->flush(disp, area, data);
+    }
+    static void read(lv_indev_t *drv, lv_indev_data_t *data) {
+      instance->read(drv, data);
+    }
+  };
+
+  using log_type = typename Callback::log_type;
+  using flush_type = typename Callback::flush_type;
+  using read_type = typename Callback::read_type;
+
+#if (LV_USE_LOG)
+  // User is required to provide log whenever the LV_USE_LOG macro is defined.
+  // It will be registered with lvgl automatically in method TPC_LCD::init().
   static const log_type log;
 #endif
+
 protected:
   struct __attribute__((packed)) point_t {
     // attributes of an individual touch event, this structure is repeated
@@ -138,16 +190,16 @@ protected:
   };
 
   // GPIO pins
-  static gpin_t constexpr _pin_sdi = 12U; // SPI MISO
-  static gpin_t constexpr _pin_sdo = 13U; // SPI MOSI
-  static gpin_t constexpr _pin_sck = 14U; // SPI SCLK
-  static gpin_t constexpr _pin_sel = 15U; // SPI SS/CS
-  static gpin_t constexpr _pin_sdc = 2U;  // LCD DC/RS
-  static gpin_t constexpr _pin_blt = 27U; // delicious BLT
-  static gpin_t constexpr _pin_scl = 32U; // I²C SCL
-  static gpin_t constexpr _pin_sda = 33U; // I²C SDA
-  static gpin_t constexpr _pin_int = 21U; // TPC INT
-  static gpin_t constexpr _pin_rst = 25U; // TPC RST
+  static pin_type constexpr _pin_sdi = 12U; // SPI MISO
+  static pin_type constexpr _pin_sdo = 13U; // SPI MOSI
+  static pin_type constexpr _pin_sck = 14U; // SPI SCLK
+  static pin_type constexpr _pin_sel = 15U; // SPI SS/CS
+  static pin_type constexpr _pin_sdc = 2U;  // LCD DC/RS
+  static pin_type constexpr _pin_blt = 27U; // delicious BLT
+  static pin_type constexpr _pin_scl = 32U; // I²C SCL
+  static pin_type constexpr _pin_sda = 33U; // I²C SDA
+  static pin_type constexpr _pin_int = 21U; // TPC INT
+  static pin_type constexpr _pin_rst = 25U; // TPC RST
   // SPI interfaces
   static uint8_t constexpr _spi_bus = 2U;          // HSPI
   static uint32_t constexpr _bus_freq = 80000000U; // 80 MHz
@@ -180,21 +232,55 @@ protected:
   static uint16_t constexpr _reg_base_point = 0x814F;
   static size_t constexpr _touch_max = 5U; // simultaneous touch points
 
+  // C callback signature of timebase required by lvgl.
   static inline void tick() { lv_tick_inc(_tft_refresh.count()); }
-  void flush(lv_display_t *drv, const lv_area_t *area, uint8_t *data);
-  void read(lv_indev_t *drv, lv_indev_data_t *data);
+
+  void flush(lv_display_t *disp, const lv_area_t *area, uint8_t *data) {
+    tx(cmd_t::caset,
+      static_cast<uint8_t>(area->x1 >> 8),
+      static_cast<uint8_t>(area->x1),
+      static_cast<uint8_t>(area->x2 >> 8),
+      static_cast<uint8_t>(area->x2));
+    tx(cmd_t::raset,
+      static_cast<uint8_t>(area->y1 >> 8),
+      static_cast<uint8_t>(area->y1),
+      static_cast<uint8_t>(area->y2 >> 8),
+      static_cast<uint8_t>(area->y2));
+
+    px(cmd_t::ramwr, data, lv_area_get_size(area) * pxsize());
+    lv_display_flush_ready(disp);
+  }
+
+  void read(lv_indev_t *drv, lv_indev_data_t *data) {
+    static int16_t _x = 0, _y = 0;
+    point_t pt;
+    switch (touch_count()) {
+    case 1:
+      if (map(&pt, 1)) {
+        data->state = LV_INDEV_STATE_PR;
+        _x = data->point.x = pt.x;
+        _y = data->point.y = pt.y;
+      }
+      break;
+    default:
+      data->point.x = _x;
+      data->point.y = _y;
+      data->state = LV_INDEV_STATE_REL;
+      break;
+    }
+  }
 
   void px(cmd_t const code, const uint8_t data[], size_t const size) {
     digitalWrite(_pin_sdc, LOW); // D/C ⇒ command
-    SPIClass::beginTransaction(SPISettings(_bus_freq, _word_ord, _sig_mode));
+    spi_type::beginTransaction(SPISettings(_bus_freq, _word_ord, _sig_mode));
     digitalWrite(_pin_sel, LOW); // C/S ⇒ enable
-    SPIClass::write(static_cast<uint8_t>(code));
+    spi_type::write(static_cast<uint8_t>(code));
     if (size > 0) {
       digitalWrite(_pin_sdc, HIGH); // D/C ⇒ data
-      SPIClass::writeBytes(data, size);
+      spi_type::writeBytes(data, size);
     }
     digitalWrite(_pin_sel, HIGH); // C/S ⇒ disable
-    SPIClass::endTransaction();
+    spi_type::endTransaction();
   }
 
   template <class... E> void tx(cmd_t const code, E... e) {
@@ -204,17 +290,17 @@ protected:
   }
 
   inline bool r16(uint16_t const reg) {
-    TwoWire::beginTransmission(_dev_addr);
-    return TwoWire::write(static_cast<uint8_t>(reg >> 8)) && // MSB (first)
-           TwoWire::write(static_cast<uint8_t>(reg & 0xFF)); // LSB
+    i2c_type::beginTransmission(_dev_addr);
+    return i2c_type::write(static_cast<uint8_t>(reg >> 8)) && // MSB (first)
+           i2c_type::write(static_cast<uint8_t>(reg & 0xFF)); // LSB
   }
 
   inline bool tx(uint16_t const reg, uint8_t *const buf, size_t const len) {
     size_t sent = 0U;
     if (r16(reg)) {
-      sent = TwoWire::write(buf, len);
+      sent = i2c_type::write(buf, len);
     }
-    TwoWire::endTransmission();
+    i2c_type::endTransmission();
     return sent == len;
   }
 
@@ -222,10 +308,10 @@ protected:
     uint8_t *dst = buf;
     size_t rem = 0U;
     bool ok = r16(reg);
-    TwoWire::endTransmission(false);
-    if (ok && (len == (rem = TwoWire::requestFrom(_dev_addr, len)))) {
-      while (TwoWire::available() && rem--) {
-        *(dst++) = TwoWire::read();
+    i2c_type::endTransmission(false);
+    if (ok && (len == (rem = i2c_type::requestFrom(_dev_addr, len)))) {
+      while (i2c_type::available() && rem--) {
+        *(dst++) = i2c_type::read();
       }
     }
     return rem == 0 && dst != buf;
@@ -243,34 +329,35 @@ protected:
   template <uint16_t R = _tft_aspect>
   inline bool map(point_t *const pt, size_t count) {
     bool ok = rx(_reg_base_point, pt, sizeof(point_t) * count);
-    ((std::function<void()>[]){[pt, count]() {
-                                 for (uint8_t i = 0; i < count; ++i) {
-                                   pt[i].x = width() - pt[i].x;
-                                   pt[i].y = height() - pt[i].y;
-                                 }
-                               },
-                               [pt, count]() {
-                                 uint16_t swap;
-                                 for (uint8_t i = 0; i < count; ++i) {
-                                   swap = pt[i].x;
-                                   pt[i].x = pt[i].y;
-                                   pt[i].y = height() - swap;
-                                 }
-                               },
-                               [pt, count]() {
-                                 for (uint8_t i = 0; i < count; ++i) {
-                                   pt[i].x = pt[i].x;
-                                   pt[i].y = pt[i].y;
-                                 }
-                               },
-                               [pt, count]() {
-                                 uint16_t swap;
-                                 for (uint8_t i = 0; i < count; ++i) {
-                                   swap = pt[i].x;
-                                   pt[i].x = width() - pt[i].y;
-                                   pt[i].y = swap;
-                                 }
-                               }}[(R >> 5) & 3])();
+    ((std::function<void()>[]){
+      [pt, count]() {
+        for (uint8_t i = 0; i < count; ++i) {
+          pt[i].x = width() - pt[i].x;
+          pt[i].y = height() - pt[i].y;
+        }
+      },
+      [pt, count]() {
+        uint16_t swap;
+        for (uint8_t i = 0; i < count; ++i) {
+          swap = pt[i].x;
+          pt[i].x = pt[i].y;
+          pt[i].y = height() - swap;
+        }
+      },
+      [pt, count]() {
+        for (uint8_t i = 0; i < count; ++i) {
+          pt[i].x = pt[i].x;
+          pt[i].y = pt[i].y;
+        }
+      },
+      [pt, count]() {
+        uint16_t swap;
+        for (uint8_t i = 0; i < count; ++i) {
+          swap = pt[i].x;
+          pt[i].x = width() - pt[i].y;
+          pt[i].y = swap;
+        }
+      }}[(R >> 5) & 3])();
     return ok;
   }
 
@@ -293,19 +380,92 @@ private:
   static inline lv_indev_t *_inpt;
   static inline uint8_t _fb[_tft_bufcount][_tft_bufsize] __attribute__((aligned(4)));
 
-  std::mutex _mutx;
-
   Ticker _tick;
   View &_view;
 
 public:
   TPC_LCD() = delete; // display driver must have a root view!
   explicit TPC_LCD(View &root, log_type log = nullptr)
-      : SPIClass(_spi_bus), TwoWire(_i2c_bus), _view(root) {}
+      : spi_type(_spi_bus), i2c_type(_i2c_bus), _view(root) {
+    Callback::instance = this;
+  }
   virtual ~TPC_LCD() {}
 
-  bool init() override;
-  void update(msecu32_t const now) override;
+  bool init() override {
+#if (LV_USE_LOG)
+    lv_log_register_print_cb(log);
+#endif
+
+    lv_init();
+    spi_type::begin(_pin_sck, _pin_sdi, _pin_sdo);
+
+    pinMode(_pin_sdc, OUTPUT); // D/C
+    pinMode(_pin_sel, OUTPUT); // CS
+    digitalWrite(_pin_sel, HIGH);
+
+    pinMode(_pin_blt, OUTPUT); // LITE (PWM)
+    ledcSetup(_pwm_blt_chan, _pwm_blt_freq, _pwm_blt_bits);
+    ledcAttachPin(_pin_blt, _pwm_blt_chan);
+
+    // ST7796 initialization sequence
+    tx(cmd_t::swreset);
+    delay(100);
+    tx(cmd_t::cscon, 0xC3); // Enable extension command 2 part I
+    tx(cmd_t::cscon, 0x96); // Enable extension command 2 part II
+    tx(cmd_t::colmod, _tft_colmod); // 16 bits R5G6B5
+    tx(cmd_t::madctl, _tft_aspect | _tft_subpixel);
+    tx(cmd_t::pgc, 0xF0, 0x09, 0x0B, 0x06, 0x04, 0x15, 0x2F, 0x54, 0x42, 0x3C, 0x17, 0x14, 0x18, 0x1B);
+    tx(cmd_t::ngc, 0xE0, 0x09, 0x0B, 0x06, 0x04, 0x03, 0x2B, 0x43, 0x42, 0x3B, 0x16, 0x14, 0x17, 0x1B);
+    tx(cmd_t::cscon, 0x3C); // Disable extension command 2 part I
+    tx(cmd_t::cscon, 0x69); // Disable extension command 2 part II
+    tx(cmd_t::invoff); // Inversion off
+    tx(cmd_t::noron);  // Normal display on
+    tx(cmd_t::slpout); // Out of sleep mode
+    tx(cmd_t::dispon); // Main screen turn on
+
+    set_backlight(_pwm_blt_hres);
+
+    _disp = lv_display_create(width(), height());
+    // Callback<void(lv_display_t *, const lv_area_t *, uint8_t *)>::fn =
+    //   std::bind(&type::flush, this,
+    //   std::placeholders::_1, std::placeholders::_2, std::placeholders::_3);
+    // lv_display_set_flush_cb(_disp, static_cast<flush_t>(
+    //   Callback<void(lv_display_t *, const lv_area_t *, uint8_t *)>::callback));
+    //auto flush = static_cast<flush_t>(std::bind(&type::flush, this,
+    //  std::placeholders::_1, std::placeholders::_2, std::placeholders::_3));
+    lv_display_set_flush_cb(_disp, Callback::flush);
+    lv_display_set_buffers(_disp, _fb[0], _fb[1], size(), LV_DISPLAY_RENDER_MODE_PARTIAL);
+    lv_obj_clean(lv_scr_act());
+
+    // ---------------------------------------------------------------------------
+    //  TODO: calibrate touch?
+    // ---------------------------------------------------------------------------
+
+    bool ok;
+    if ((ok = i2c_type::begin(_pin_sda, _pin_scl))) {
+      static uint8_t pid[_size_prod_id];
+      ok = rx(_reg_prod_id, pid, sizeof(pid));
+    }
+
+    _inpt = lv_indev_create();
+    // Callback<void(lv_indev_t *, lv_indev_data_t *)>::fn =
+    //   std::bind(&type::read, this,
+    //   std::placeholders::_1, std::placeholders::_2);
+    lv_indev_set_type(_inpt, LV_INDEV_TYPE_POINTER);
+    lv_indev_set_read_cb(_inpt, Callback::read);
+    // lv_indev_set_read_cb(_inpt, static_cast<read_t>(
+    //   Callback<void(lv_indev_t *, lv_indev_data_t *)>::callback));
+
+    if ((ok = ok && _view.init(lv_scr_act()))) {
+      _tick.attach_ms(_tft_refresh.count(), tick);
+    }
+
+    return ok;
+  }
+  void update(msecu32_t const now) override {
+    lv_timer_handler();
+    _view.update(now);
+  }
 
   View &view() { return _view; }
 
@@ -330,12 +490,16 @@ public:
   }
 };
 
-class RGB_PWM : Controller, public StatusLED { // RGB 3-pin analog LED
-private:
+template <typename AtomicType = Atomic<>>
+class RGB_PWM: Controller, AtomicType { // RGB 3-pin analog LR
+public:
+  using type        = RGB_PWM;
+  using atomic_type = AtomicType;
+
 protected:
-  static gpin_t const _pin_r = 4U;
-  static gpin_t const _pin_g = 16U;
-  static gpin_t const _pin_b = 17U;
+  static pin_type const _pin_r = 4U;
+  static pin_type const _pin_g = 16U;
+  static pin_type const _pin_b = 17U;
 
   static uint8_t const _pwm_r_chan = 13U;
   static uint8_t const _pwm_g_chan = 14U;
@@ -345,74 +509,144 @@ protected:
   static uint8_t const _pwm_bits = 8U;
   static uint8_t const _pwm_hres = (1U << _pwm_bits) - 1U;
 
-private:
-  std::mutex _mutx;
+  lv_color32_t _rgb, _set; // _rgb is last set value, _set is buffer for next
 
 public:
-  RGB_PWM()
-      : StatusLED(_pin_r, _pin_g, _pin_b, HIGH, StatusLEDMode::Fixed, 100U,
-                  true, COLOR_RED, 0x3F) {
-    setWrite([&](SRGB const &rgb) {
-      // write() always clips its actual argument's components to 8-bits,
-      // so there is no narrowing happening in these typecasts.
-      set(LV_COLOR_MAKE(
-        static_cast<uint8_t>(rgb.red),
-        static_cast<uint8_t>(rgb.green),
-        static_cast<uint8_t>(rgb.blue)
-      ));
-    });
+  RGB_PWM() {
   }
-  bool init() override;
-  void update(msecu32_t const now) override;
-
-  void set(lv_color32_t const rgb);
+  bool init() override {
+    // Red
+    pinMode(_pin_r, OUTPUT);
+    digitalWrite(_pin_r, true);
+    ledcSetup(_pwm_r_chan, _pwm_freq, _pwm_bits);
+    ledcAttachPin(_pin_r, _pwm_r_chan);
+    // Green
+    pinMode(_pin_g, OUTPUT);
+    digitalWrite(_pin_g, true);
+    ledcSetup(_pwm_g_chan, _pwm_freq, _pwm_bits);
+    ledcAttachPin(_pin_g, _pwm_g_chan);
+    // Blue
+    pinMode(_pin_b, OUTPUT);
+    digitalWrite(_pin_b, true);
+    ledcSetup(_pwm_b_chan, _pwm_freq, _pwm_bits);
+    ledcAttachPin(_pin_b, _pwm_b_chan);
+    set({});
+    update(msecu32_t{0});
+    return true;
+  }
+  void update(msecu32_t const now) override {
+    if (now.count() > 0) {
+      auto scope = atomic_type::make();
+      if (lv_color32_eq(_rgb, _set)) {
+        return;
+      }
+    }
+    write(_set);
+  }
+  lv_color32_t get() noexcept {
+    auto scope = atomic_type::make();
+    return _rgb;
+  }
+  void set(lv_color32_t const rgb) noexcept {
+    auto scope = atomic_type::make();
+    _set = rgb;
+  }
+  void write(lv_color32_t const rgb) noexcept {
+    {
+      auto scope = atomic_type::make();
+      _rgb = rgb;
+    }
+    ledcWrite(_pwm_r_chan, _pwm_hres - rgb.red);
+    ledcWrite(_pwm_g_chan, _pwm_hres - rgb.green);
+    ledcWrite(_pwm_b_chan, _pwm_hres - rgb.blue);
+  }
 };
 
-class AMP_PWM : Controller { // Autio amplifier
-private:
-  std::mutex _mutx;
+template <typename AtomicType = Atomic<>>
+class AMP_PWM: Controller, AtomicType { // Autio amplifier
+public:
+  using type        = AMP_PWM;
+  using atomic_type = AtomicType;
 
 protected:
-  static gpin_t const _pin = 26U;
+  static pin_type const _pin = 26U;
 
 public:
-  bool init() override;
-  void update(msecu32_t const now) override;
-
-  void set(uint32_t const hz, msecu32_t const ms);
-  void mute();
+  bool init() override {
+    pinMode(_pin, INPUT); // High impedence
+    update(msecu32_t{0});
+    return true;
+  }
+  void update(msecu32_t const now) override {
+  }
+  void set(uint32_t const hz, msecu32_t const ms) {
+    tone(_pin, hz, ms.count());
+  }
+  void mute() {
+    noTone(_pin);
+  }
 };
 
-class CDS_ADC : Controller { // Light sensitive photo-resistor
-private:
-  std::mutex _mutx;
+template <typename AtomicType = Atomic<>>
+class CDS_ADC: Controller, AtomicType { // Light sensitive photo-resistor
+public:
+  using type        = CDS_ADC;
+  using atomic_type = AtomicType;
 
 protected:
   static adc_attenuation_t const _att = ADC_0db; // 0dB (1.0x): 0~800mV
 
-  static gpin_t const _pin = 34U; // A0
+  static pin_type const _pin = 34U; // A0
+
+  int _val; // _val is last read value, _get is buffer for next
 
 public:
-  bool init() override;
-  void update(msecu32_t const now) override;
-
-  int get();
+  bool init() override {
+    analogSetAttenuation(_att); // 0dB(1.0x) 0~800mV
+    pinMode(_pin, INPUT);
+    update(msecu32_t{0});
+    return true;
+  }
+  void update(msecu32_t const now) override {
+    read();
+  }
+  int get() {
+    auto scope = atomic_type::make();
+    return _val;
+  }
+  int read() {
+    auto scope = atomic_type::make();
+    _val = analogRead(_pin);
+    return _val;
+  }
 };
 
-class SDC_SPI : Controller { // MicroSD card
-private:
-  std::mutex _mutx;
+template <typename AtomicType = Atomic<>>
+class SDC_SPI: Controller, AtomicType { // MicroSD card
+public:
+  using type        = SDC_SPI;
+  using atomic_type = AtomicType;
 
 protected:
-  static gpin_t const _pin_sdi = 19U;
-  static gpin_t const _pin_sdo = 23U;
-  static gpin_t const _pin_sck = 18U;
-  static gpin_t const _pin_sel = 5U;
+  static pin_type const _pin_sdi = 19U;
+  static pin_type const _pin_sdo = 23U;
+  static pin_type const _pin_sck = 18U;
+  static pin_type const _pin_sel = 5U;
 
 public:
-  bool init() override;
-  void update(msecu32_t const now) override;
+  bool init() override {
+    update(msecu32_t{0});
+    return true;
+  }
+  void update(msecu32_t const now) override {
+  }
 };
+
+using tpc_type = TPC_LCD<>;
+using rgb_type = RGB_PWM<>;
+using amp_type = AMP_PWM<>;
+using cds_type = CDS_ADC<>;
+using sdc_type = SDC_SPI<>;
 
 class ESP323248S035 : Controller {};
 
@@ -428,23 +662,22 @@ template <class V> class ESP323248S035C : public ESP323248S035 {
 protected:
   static constexpr msecu32_t _refresh = msecu32_t{20};
 
-public:
-  static inline constexpr msecu32_t refresh() { return _refresh; }
-
   // All hardware peripherals found on-board, external to the ESP32, that have
   // class drivers implemented in this library.
   // This is a singleton class, with a single instance named _hw, which is
   // instantiated in the outer/parent class's member initializer list.
   struct hw_t {
-    TPC_LCD tpc;
-    RGB_PWM rgb;
-    AMP_PWM amp;
-    CDS_ADC cds;
-    SDC_SPI sdc;
+    tpc_type tpc;
+    rgb_type rgb;
+    amp_type amp;
+    cds_type cds;
+    sdc_type sdc;
     hw_t(V &view) : tpc(view) {}
   } _hw;
 
 public:
+  static inline constexpr msecu32_t refresh() { return _refresh; }
+
   // Accessor for members of the hardware peripherals (hw_t) singleton instance.
   //
   // Instead of using separate methods for each member, we use a template and
@@ -455,11 +688,11 @@ public:
   // compile time in a method's signature (e.g., as default argument).
   template <class C> inline C &hw() {
     union {
-      TPC_LCD &cast(hw_t &p, TPC_LCD *) { return p.tpc; }
-      RGB_PWM &cast(hw_t &p, RGB_PWM *) { return p.rgb; }
-      AMP_PWM &cast(hw_t &p, AMP_PWM *) { return p.amp; }
-      CDS_ADC &cast(hw_t &p, CDS_ADC *) { return p.cds; }
-      SDC_SPI &cast(hw_t &p, SDC_SPI *) { return p.sdc; }
+      tpc_type &cast(hw_t &p, tpc_type *) { return p.tpc; }
+      rgb_type &cast(hw_t &p, rgb_type *) { return p.rgb; }
+      amp_type &cast(hw_t &p, amp_type *) { return p.amp; }
+      cds_type &cast(hw_t &p, cds_type *) { return p.cds; }
+      sdc_type &cast(hw_t &p, sdc_type *) { return p.sdc; }
     } u;
     return u.cast(_hw, static_cast<C *>(0));
   }

@@ -1,8 +1,9 @@
-**/.vscode/
-
 examples/*/*
 !examples/arduino/**/*.{c,cpp,h,hpp}
 !examples/arduino/**/Makefile
 !examples/platformio/**
+
+**/.vscode/
+**/*.code-workspace
 
 **/*.o

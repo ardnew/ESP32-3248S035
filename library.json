@@ -4,7 +4,7 @@
   "description": "Board support package for Sunton ESP32-3248S035",
   "homepage": "https://github.com/ardnew/ESP32-3248S035",
   "license": "MIT",
-  "version": "0.1.3",
+  "version": "0.2.0",
   "frameworks": [
     "arduino"
   ],
@@ -13,8 +13,7 @@
   ],
   "dependencies": {
     "ardnew/cronos": "^0.1.6",
-    "ardnew/StatusLED": "https://github.com/ardnew/StatusLED#0.2.0",
-    "lvgl/lvgl": "@9"
+    "lvgl/lvgl": "^9"
   },
   "headers": [
     "ESP323248S035.hpp"
