@@ -4,7 +4,7 @@
   "description": "Board support package for Sunton ESP32-3248S035",
   "homepage": "https://github.com/ardnew/ESP32-3248S035",
   "license": "MIT",
-  "version": "0.2.0",
+  "version": "0.2.1",
   "frameworks": [
     "arduino"
   ],
@@ -12,13 +12,16 @@
     "espressif32"
   ],
   "dependencies": {
-    "ardnew/cronos": "^0.1.6",
-    "lvgl/lvgl": "^9"
+    "ardnew/cronos": "^0.2.1",
+    "lvgl/lvgl": "^9.1.0"
   },
   "headers": [
     "ESP323248S035.hpp"
   ],
   "build": {
+    "unflags": [
+      "-std=gnu++11", "-std=gnu++14"
+    ],
     "flags": [
       "-std=gnu++17",
       "-DLV_CONF_INCLUDE_SIMPLE=1",
