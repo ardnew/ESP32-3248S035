@@ -1,34 +1,10 @@
 {
   "name": "ESP32-3248S035",
-  "keywords": "ESP32-3248S035, ESP32-3248S035C, ESP32, ST7796, GT911",
-  "description": "Board support package for Sunton ESP32-3248S035",
+  "version": "0.3.0",
+  "description": "C++ board support package, DMA-enabled lvgl driver, and root view controller for Sunton ESP32-3248S035",
+  "keywords": "ESP32-3248S035, ESP32-3248S035C, ESP32, ST7796, ST7796S, GT911, lvgl, DMA, PlatformIO, ESP-IDF, Arduino, C++, C++17",
   "homepage": "https://github.com/ardnew/ESP32-3248S035",
   "license": "MIT",
-  "version": "0.2.1",
-  "frameworks": [
-    "arduino"
-  ],
-  "platforms": [
-    "espressif32"
-  ],
-  "dependencies": {
-    "ardnew/cronos": "^0.2.1",
-    "lvgl/lvgl": "^9.1.0"
-  },
-  "headers": [
-    "ESP323248S035.hpp"
-  ],
-  "build": {
-    "unflags": [
-      "-std=gnu++11", "-std=gnu++14"
-    ],
-    "flags": [
-      "-std=gnu++17",
-      "-DLV_CONF_INCLUDE_SIMPLE=1",
-      "-DLV_CONF_SKIP=1",
-      "-DLV_COLOR_DEPTH=16"
-    ]
-  },
   "repository": {
     "type": "git",
     "url": "https://github.com/ardnew/ESP32-3248S035"
@@ -40,5 +16,22 @@
       "url": "https://github.com/ardnew",
       "maintainer": "true"
     }
-  ]
+  ],
+  "frameworks": [
+    "arduino",
+    "esp-idf"
+  ],
+  "platforms": [
+    "espressif32"
+  ],
+  "dependencies": {
+    "ardnew/cronos": "^0.2",
+    "lvgl/lvgl": "symlink:///opt/lvgl/src"
+  },
+  "headers": [
+    "esp323248s035.hpp"
+  ],
+  "scripts": {
+    "postinstall": "scripts/platformio/postinstall.py"
+  }
 }

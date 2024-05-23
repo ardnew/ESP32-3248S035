@@ -1,0 +1,74 @@
+{
+  "build": {
+    "arduino": {
+      "ldscript": "esp32_out.ld"
+    },
+    "core": "esp32",
+    "extra_flags": [
+      "-mtext-section-literals",
+
+      "'-D LCD_PHY_RES_X=( 320 )'",
+      "'-D LCD_PHY_RES_Y=( 480 )'",
+
+      "'-D LCD_SPI_HOST_ID=( SPI2_HOST )'",
+      "'-D LCD_SPI_FREQ_HZ=( SPI_MASTER_FREQ_20M )'",
+      "'-D LCD_SPI_DMA_CAP=( MALLOC_CAP_INTERNAL|MALLOC_CAP_DMA )'",
+      "'-D LCD_SPI_TX_REPS=( 10 )'",
+      "'-D LCD_SPI_TX_POOL=( 50 )'",
+      "'-D LCD_SPI_TX_RESV=( LCD_SPI_TX_POOL/10 )'",
+      "'-D LCD_SPI_PIN_SDI=( 12 )'",
+      "'-D LCD_SPI_PIN_SDO=( 13 )'",
+      "'-D LCD_SPI_PIN_SCK=( 14 )'",
+      "'-D LCD_SPI_PIN_SEL=( 15 )'",
+      "'-D LCD_SPI_PIN_SDC=( 2 )'",
+      "'-D LCD_I2C_PIN_SCL=( 32 )'",
+      "'-D LCD_I2C_PIN_SDA=( 33 )'",
+      "'-D LCD_I2C_PIN_INT=( 21 )'",
+      "'-D LCD_I2C_PIN_RST=( 25 )'",
+      "'-D LCD_PWM_PIN_BLT=( 27 )'",
+      "'-D LCD_PWM_CHAN_BLT=( 12 )'",
+      "'-D LCD_PWM_FREQ_BLT=( 5000 )'",
+      "'-D LCD_PWM_BITS_BLT=( 10 )'",
+
+      "'-D LV_CONF_INCLUDE_SIMPLE=( 1 )'",
+      "'-D LV_CONF_SKIP=( 1 )'",
+      "'-D LV_COLOR_DEPTH=( 16 )'",
+      "'-D LV_USE_ST7796=( 1 )'",
+      "'-D LV_USE_LOG=( 1 )'",
+      "'-D LV_LOG_PRINTF=( 1 )'",
+      "'-D LV_LOG_LEVEL=( LV_LOG_LEVEL_INFO )'",
+
+      "'-D FREERTOS_LVGL_TASK_NAME=( \"lvgl\" )'",
+      "'-D FREERTOS_LVGL_TASK_STACK_SIZE=( 4 * 1024 )'",
+      "'-D FREERTOS_LVGL_TASK_PRIORITY=( 2 )'"
+    ],
+    "f_cpu": "240000000L",
+    "f_flash": "40000000L",
+    "flash_mode": "dio",
+    "mcu": "esp32",
+    "variant": "esp32"
+  },
+  "connectivity": [
+    "wifi",
+    "bluetooth",
+    "ethernet",
+    "can"
+  ],
+  "debug": {
+    "openocd_board": "esp-wroom-32.cfg"
+  },
+  "frameworks": [
+    "arduino",
+    "espidf"
+  ],
+  "name": "esp323248s035c",
+  "upload": {
+    "flash_size": "4MB",
+    "maximum_ram_size": 327680,
+    "maximum_size": 4194304,
+    "require_upload_port": true,
+    "speed": 460800
+  },
+  "url": "https://www.aliexpress.com/item/1005004632953455.html",
+  "vendor": "Sunton"
+}
