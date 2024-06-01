@@ -11,22 +11,30 @@
 #include <esp_check.h>
 #include <esp_err.h>
 #include <esp_task_wdt.h>
+#include <esp_lcd_panel_commands.h>
+#include <esp_lcd_panel_interface.h>
+#include <esp_lcd_panel_io_interface.h>
+#include <esp_lcd_panel_io.h>
+#include <esp_lcd_panel_vendor.h>
+#include <esp_lcd_panel_ops.h>
 #include <driver/gpio.h>
 #include <driver/ledc.h>
 #include <driver/spi_master.h>
 #include <driver/spi_common.h>
 #include <driver/spi_common_internal.h>
+#include <driver/i2c.h>
 #include <soc/ledc_periph.h>
 #include <freertos/FreeRTOS.h>
 #include <freertos/task.h>
 #include <freertos/queue.h>
 // External libraries
 #include <lvgl.h>
-#include <src/drivers/display/st7796/lv_st7796.h>
+#include <drivers/display/st7796/lv_st7796.h>
 #include <cronos.hpp>
 // C++ stdlib
 #include <algorithm>
 #include <chrono>
+#include <initializer_list>
 #include <mutex>
 #include <cstddef>
 #include <cstring>
@@ -48,6 +56,23 @@
   bsp::log_write("\r\n")
 
 #pragma endregion "Definitions"
+// -----------------------------------------------------------------------------
+#pragma region "User-defined literals"
+
+// Convert common duration/period units to CPU ticks. These are mostly intended
+// for the user's implementation of Controller::refresh_rate().
+static inline constexpr auto operator ""_Hz(unsigned long long hz)
+  { return pdMS_TO_TICKS(configTICK_RATE_HZ / hz); }
+static inline constexpr auto operator ""_kHz(unsigned long long kHz)
+  { return pdMS_TO_TICKS(configTICK_RATE_HZ / (1000ULL * kHz)); }
+static inline constexpr auto operator ""_us(unsigned long long us)
+  { return pdMS_TO_TICKS(us / 1000ULL); }
+static inline constexpr auto operator ""_ms(unsigned long long ms)
+  { return pdMS_TO_TICKS(ms); }
+static inline constexpr auto operator ""_s(unsigned long long s)
+  { return pdMS_TO_TICKS(1000ULL * s); }
+
+#pragma endregion "User-defined literals"
 // -----------------------------------------------------------------------------
 
 #pragma endregion "Preprocessor macros"
@@ -81,8 +106,20 @@ static inline constexpr char TAG[] = "ESP32-3248S035";
 // It is intended to be used as a base class for singleton classes that need to
 // protect access to the hardware peripherals they represent.
 struct Critical : std::mutex {
-  using Section = std::scoped_lock<Critical::mutex>;
-  virtual inline const Section lock() { return Section(*this); }
+  using Section = const std::lock_guard<Critical::mutex>;
+
+  // By using lock() from a derived context — which uses *this as the mutex —
+  // the derived class can prevent concurrent access to any number of critical
+  // sections (CSs) nested within otherwise unrelated methods (e.g., methods
+  // that utilize the same hardware resource in methods Tx() and Rx()).
+  virtual inline volatile Section lock()
+    { return Section(*this); }
+
+  // If a derived class needs to guard a critical section (CS) based on some
+  // other mutex — i.e., prevent concurrent access to its own CS while still
+  // permitting concurrent access to other CSs —  it only needs to declare a
+  // Critical member variable, and use that variable's lock() method instead of
+  // the inherited lock() method.
 };
 
 template <typename ...T>
@@ -96,7 +133,16 @@ struct Updater {
 
 template <typename ...T>
 struct Controller : Critical, Initer<T...>, Updater {
-  virtual std::uint32_t refresh_hz() const noexcept = 0;
+  // "WTF?" you might ask, "I have to define refresh rate in CPU ticks?"
+  // Alas, dear reader — yes, you must. But! Fear not, for I have provided
+  // some snazzy user-defined literals that justify this nonsense.
+  //
+  // For example, 30_Hz, 20_ms, 6789_kHz, and 1_s are all valid, self-evident,
+  // and self-documenting values.
+  //
+  // BONUS: The user-defined literals can actually be used anywhere a TickType_t
+  // value is expected (delays, timers, frequencies, etc.).
+  virtual TickType_t refresh_rate() const noexcept = 0;
 };
 
 struct View : Controller<lv_obj_t *> {
@@ -107,26 +153,41 @@ struct View : Controller<lv_obj_t *> {
 // -----------------------------------------------------------------------------
 #pragma region "Utility functions"
 
-// Combine words using bitwise operators.
+// Return current tick count in milliseconds.
+static inline std::uint32_t millis() noexcept
+  { return pdTICKS_TO_MS(xTaskGetTickCount()); }
+
+// Combine words at compile-time using bitwise operators.
 //
 // These can increase readability, since each operand is an argument and does
 // not require parentheses to enforce precedence.
-template <typename ...U> inline constexpr auto  or_bits(U... u) { return (u | ...); }
-template <typename ...U> inline constexpr auto and_bits(U... u) { return (u & ...); }
+//
+// Additionally, these can be used to express operands (and result) as another
+// type, which is necessary when their type's bitwise operator is undefined;
+// e.g., enum class{} elems, different types (std::size_t|std::uint32_t), etc.
+template <typename T, typename ...U>
+inline constexpr auto  or_bits(U... u)
+  { return (static_cast<T>(u) | ...); }
+template <typename T, typename ...U>
+inline constexpr auto and_bits(U... u)
+  { return (static_cast<T>(u) & ...); }
+
+// Return the N'th least-addressable byte in an unsigned integral value.
+template <std::size_t N, typename T,
+  std::enable_if<std::is_integral_v<T>, T>* = nullptr>
+inline constexpr std::uint8_t byte_at(T value)
+  { return static_cast<std::uint8_t>(value >> (N << 3)); }
 
 // Log messages to stdout or stderr (on, e.g., the default serial port).
-template <typename ...U> inline void log_write(U... u) { fprintf(stdout, u...); }
-template <typename ...U> inline void log_error(U... u) { fprintf(stderr, u...); }
+template <typename ...U> inline void log_write(U... u)
+  { fprintf(stdout, u...); }
+template <typename ...U> inline void log_error(U... u)
+  { fprintf(stderr, u...); }
 
-// In-place byte swap for an array of elements.
-template <typename T>
-void byte_swap(const T *p, std::size_t n) {
-    for (std::size_t head = 0, tail = n - 1;  head < n / 2;  ++head, --tail) {
-        std::swap(((std::uint8_t *)p)[head], ((std::uint8_t *)p)[tail]);
-    }
-}
-
-void print_buffer(const void *buf, std::size_t len, const bool eol = true, const char *fsz = "[%lu] ", const char *fmt = "%02X ") {
+void print_buffer(
+  const void *buf, std::size_t len, const bool eol = true,
+  const char *fsz = "[%lu] ", const char *fmt = "%02X "
+) {
   std::size_t total = std::min(len, static_cast<std::size_t>(32));
   std::size_t limit = len > total ? total / 2 : len;
   printf(fsz, len);
@@ -146,16 +207,79 @@ void print_buffer(const void *buf, std::size_t len, const bool eol = true, const
 // -----------------------------------------------------------------------------
 #pragma region "Hardware abstractions"
 
+struct TIM : Critical, Initer<const bool> {
+public:
+  using duration_t = native::ticker::duration;
+
+public:
+  TIM(
+    const std::string &name, // Unique name to give timer
+    const esp_timer_cb_t &cb, // Periodic callback
+    // Optional parameters
+    void *arg = nullptr, // Argument passed to callback
+    const duration_t &period = msecu32_t{pdTICKS_TO_MS(LCD_TICK_RATE)}
+  )
+  : _args(esp_timer_create_args_t{
+      .callback = cb,
+      .arg = arg,
+      .dispatch_method = ESP_TIMER_TASK, // ISR method NOT supported on ESP32
+      .name = name.c_str(),
+      .skip_unhandled_events = false,
+    }),
+    _handle(nullptr),
+    _period(period),
+    _since(msecu32()) {}
+
+  virtual ~TIM() {
+    if (_handle != nullptr) {
+      ESP_ERROR_CHECK(
+        esp_timer_delete(_handle)
+      );
+    }
+  }
+
+  virtual esp_err_t init(const bool begin = true) override {
+    {
+      auto token = lock();
+      ESP_ERROR_CHECK(
+        esp_timer_create(&_args, &_handle)
+      );
+    }
+    if (begin) {
+      return start();
+    }
+    return ESP_OK;
+  }
+
+  inline esp_err_t start() {
+    return esp_timer_start_periodic(_handle, _period.count());
+  }
+
+  inline esp_err_t stop() {
+    return esp_timer_stop(_handle);
+  }
+
+  inline auto elapsed() noexcept {
+    const auto last = _since;
+    _since = msecu32();
+    return _since - last;
+  }
+
+protected:
+  const duration_t _period;
+  const esp_timer_create_args_t _args;
+  esp_timer_handle_t _handle;
+  msecu32_t _since;
+};
+
 struct PWM : Critical, Initer<> {
 public:
   using level_t = std::uint8_t;
-  static constexpr level_t default_level = 0x80;
-
-protected:
-  const ledc_channel_config_t _channel;
-  const ledc_timer_config_t _timer;
-  const bool _active_low;
-  level_t _level;
+  static constexpr level_t min_level = std::numeric_limits<level_t>::min();
+  static constexpr level_t max_level = std::numeric_limits<level_t>::max();
+  static constexpr float min_ratio = static_cast<float>(min_level);
+  static constexpr float max_ratio = static_cast<float>(max_level);
+  static constexpr level_t default_level = 0x0;
 
 public:
   PWM(
@@ -225,6 +349,7 @@ public:
     return set(_level);
   }
 
+public:
   std::uint32_t duty(const level_t level) const noexcept {
     // Scale level to resolution, e.g.:
     //   8-bit=[0,255] → 10-bit=[0,1023] <==> (level * 1023) / 255
@@ -243,6 +368,13 @@ public:
     );
     _level = level;
     return ESP_OK;
+  }
+
+  // Set the backlight level as a ratio from 0.0 (off) to 1.0 (max brightness).
+  esp_err_t set(const float ratio) {
+    return set(static_cast<level_t>(
+      ratio * (max_ratio - min_ratio) + min_ratio + 0.5f // naive rounding
+    ));
   }
 
   // esp_err_t fade(const int level) {
@@ -265,132 +397,14 @@ public:
   //   );
   // }
 
-  static inline constexpr level_t max_level() noexcept
-    { return std::numeric_limits<level_t>::max(); }
-  static inline constexpr level_t min_level() noexcept
-    { return std::numeric_limits<level_t>::min(); }
+protected:
+  const ledc_channel_config_t _channel;
+  const ledc_timer_config_t _timer;
+  const bool _active_low;
+  level_t _level;
 };
 
 struct SPI : Critical, Initer<> {
-public:
-  struct Device : Initer<std::function<esp_err_t(Device *)>> {
-    spi_device_handle_t handle;
-    spi_device_interface_config_t config;
-    gpio_num_t cs_pin;
-    gpio_num_t dc_pin;
-    Device(
-      gpio_num_t cs_pin, // Chip-select (CS) pin
-      gpio_num_t dc_pin, // Data/command (DC) or register select (RS) pin
-      int freq_hz, // SPI bus frequency
-      int pool_size, // "In-flight" transaction queue size
-      transaction_cb_t pre_tx, // Pre-transaction callback
-      transaction_cb_t post_tx, // Post-transaction callback
-      // Optional parameters
-      std::uint8_t mode = 0, // Mode 0
-      std::uint32_t flags = SPI_DEVICE_HALFDUPLEX|SPI_DEVICE_NO_DUMMY,
-      std::uint8_t command = 8,
-      std::uint8_t address = 8,
-      std::uint8_t dummy = 0,
-      std::uint16_t duty = 0,
-      std::uint16_t wait = 0,
-      std::uint8_t hold = 0,
-      int valid = 0
-    )
-    : handle(nullptr),
-      config({
-        .command_bits = command,
-        .address_bits = address,
-        .dummy_bits = dummy,
-        .mode = mode,
-        .duty_cycle_pos = duty,
-        .cs_ena_pretrans = wait,
-        .cs_ena_posttrans = hold,
-        .clock_speed_hz = freq_hz,
-        .input_delay_ns = valid,
-        .spics_io_num = static_cast<int>(cs_pin),
-        .flags = flags,
-        .queue_size = pool_size,
-        .pre_cb = pre_tx,
-        .post_cb = post_tx,
-      }),
-      cs_pin(cs_pin),
-      dc_pin(dc_pin) {}
-
-    virtual ~Device() {
-      ESP_ERROR_CHECK_WITHOUT_ABORT(
-        spi_bus_remove_device(handle)
-      );
-    }
-
-    virtual esp_err_t init(
-      std::function<esp_err_t(Device *)> init_func
-    ) override {
-      return init_func(this);
-    }
-  };
-
-  struct Queue : Initer<> {
-    using item_t = spi_transaction_t;
-    using item_ptr_t = item_t *;
-    using item_ptr_ref_t = item_ptr_t &;
-
-    Queue(std::size_t size)
-    : _queue(xQueueCreate(size, sizeof(item_ptr_t))),
-      _capacity(size) {}
-
-    virtual ~Queue() {
-      if (_queue != nullptr) {
-        vQueueDelete(_queue);
-      }
-    }
-
-    virtual esp_err_t init() override {
-      for (std::size_t i = 0; i < _capacity; ++i) {
-        item_ptr_t pit = static_cast<item_ptr_t>(
-          heap_caps_malloc(sizeof(item_t), LCD_SPI_DMA_CAP)
-        );
-        ESP_RETURN_ON_FALSE(
-          pit != nullptr,
-          ESP_ERR_NO_MEM,
-          TAG, "failed to allocate SPI transaction"
-        );
-        memset(pit, 0, sizeof(item_t));
-        send(pit, 0);
-      }
-      return ESP_OK;
-    }
-
-    esp_err_t send(item_ptr_ref_t p, TickType_t ticks) {
-      return xQueueSend(_queue, &p, ticks);
-    }
-
-    esp_err_t receive(item_ptr_ref_t p, TickType_t ticks) {
-      return xQueueReceive(_queue, &p, ticks);
-    }
-
-    bool is_full() const noexcept {
-      return uxQueueMessagesWaiting(_queue) == 0;
-    }
-
-    void yield(SPI::Device *dev, std::size_t count) {
-      item_ptr_t pit = nullptr;
-      while (uxQueueMessagesWaiting(_queue) < count) {
-        if (spi_device_get_trans_result(dev->handle, &pit, 1) == ESP_OK) {
-          send(pit, 0);
-        }
-      }
-    }
-
-  protected:
-    QueueHandle_t _queue;
-    std::size_t _capacity;
-  };
-
-protected:
-  const spi_host_device_t _host;
-  const spi_bus_config_t _config;
-  const spi_common_dma_t _dma_channel;
-
 public:
   SPI(
     const spi_host_device_t host, // SPI host device
@@ -402,14 +416,14 @@ public:
     const spi_common_dma_t dmach  = SPI_DMA_CH_AUTO
   )
   : _host(host),
-    _config(spi_bus_config_t{
+    _config((spi_bus_config_t){
       .mosi_io_num = mosi,
       .miso_io_num = miso,
       .sclk_io_num = sclk,
       .quadwp_io_num = -1,
       .quadhd_io_num = -1,
       .max_transfer_sz = static_cast<int>(txsize),
-      .flags = SPICOMMON_BUSFLAG_MASTER,
+      .flags = 0, // SPICOMMON_BUSFLAG_MASTER|SPICOMMON_BUSFLAG_NATIVE_PINS,
       .intr_flags = 0,
     }),
     _dma_channel(dmach) {}
@@ -432,12 +446,105 @@ public:
     return ESP_OK;
   }
 
-  esp_err_t add(Device *dev) {
+public:
+  spi_host_device_t host() const noexcept { return _host; }
+  spi_bus_config_t config() const noexcept { return _config; }
+
+protected:
+  const spi_host_device_t _host;
+  const spi_bus_config_t _config;
+  const spi_common_dma_t _dma_channel;
+};
+
+struct I2C : Critical, Initer<> {
+public:
+  I2C(
+    const i2c_port_t port, // I²C port
+    const gpio_num_t sda, // SDA pin
+    const gpio_num_t scl, // SCL pin
+    // Optional parameters
+    const TickType_t timeout = LCD_I2C_TIMEOUT,
+    const i2c_mode_t mode = I2C_MODE_MASTER,
+    const std::uint32_t clock = LCD_I2C_FREQ_HZ
+  )
+  : _port(port),
+    _config((i2c_config_t){
+      .mode = mode,
+      .sda_io_num = sda,
+      .scl_io_num = scl,
+      .sda_pullup_en = GPIO_PULLUP_ENABLE,
+      .scl_pullup_en = GPIO_PULLUP_ENABLE,
+      .master = { .clk_speed = clock }
+    }),
+    _timeout(timeout) {}
+
+  virtual ~I2C() {
     Critical::Section token = lock();
-    return spi_bus_add_device(_host, &(dev->config), &(dev->handle));
+    ESP_ERROR_CHECK_WITHOUT_ABORT(
+      i2c_driver_delete(_port)
+    );
   }
 
-  spi_bus_config_t config() const noexcept { return _config; }
+  virtual esp_err_t init() override {
+    Critical::Section token = lock();
+    ESP_RETURN_ON_ERROR(
+      i2c_param_config(_port, &_config),
+      TAG, "failed to configure I²C parameters"
+    );
+    ESP_RETURN_ON_ERROR(
+      i2c_driver_install(_port, _config.mode, 0, 0, 0),
+      TAG, "failed to install I²C driver"
+    );
+    return ESP_OK;
+  }
+
+public:
+  i2c_port_t port() const noexcept { return _port; }
+  i2c_config_t config() const noexcept { return _config; }
+
+  esp_err_t reg_rx(
+    const std::uint8_t dev_addr,
+    const std::uint16_t reg_addr,
+    std::uint8_t *rx_buff,
+    const std::size_t rx_size
+  ) {
+    std::uint8_t reg_addr_msb[2] = {
+      byte_at<1>(reg_addr),
+      byte_at<0>(reg_addr)
+    };
+    ESP_RETURN_ON_ERROR(
+      i2c_master_write_read_device(
+        _port, dev_addr, reg_addr_msb, 2, rx_buff, rx_size, _timeout
+      ),
+      TAG, "failed to read from I²C device"
+    );
+    return ESP_OK;
+  }
+
+  template <const std::uint8_t... Tx>
+  esp_err_t reg_tx(
+    const std::uint8_t dev_addr,
+    const std::uint16_t reg_addr
+  ) {
+    const std::size_t tx_size = sizeof...(Tx) + 2;
+    const std::uint8_t tx_buff[tx_size] = {
+      byte_at<1>(reg_addr),
+      byte_at<0>(reg_addr),
+      Tx...
+    };
+    ESP_RETURN_ON_ERROR(
+      i2c_master_write_to_device(
+        _port, dev_addr, tx_buff, tx_size, _timeout
+      ),
+      TAG, "failed to write to I²C device"
+    );
+    return ESP_OK;
+  }
+
+protected:
+  const i2c_port_t _port;
+  const i2c_config_t _config;
+  const TickType_t _timeout;
 };
 
 #pragma endregion "Hardware abstractions"
@@ -452,73 +559,115 @@ struct LCD : Critical, Initer<View *> {
 public:
   // The maximum size (bytes) of an SPI transaction (Rx/Tx).
   static constexpr std::size_t spi_transfer_size = (LV_COLOR_DEPTH >> 3) *
-    LCD_PHY_RES_X * LCD_PHY_RES_Y / LCD_SPI_TX_REPS;
+    LCD_PHY_RES_X * LCD_PHY_RES_Y / LCD_SPI_TX_NDIV;
 
-  // Context objects attached to the (void*)user field of spi_transaction_t.
-  // Used for attaching arbitrary data to a transaction.
-  struct Context {
-    // Mode controls the signal level of DC/RS. This line is connected to an
-    // ordinary GPIO pin and changed during pre-transfer callback (pre_tx).
-    enum class Mode : std::uint32_t {
-      Command = 0,
-      Data
-    };
-
-    // Method controls how the SPI transaction is performed.
-    enum class Method : std::uint8_t {
-      Sync  = 0b001, // MIPI commands and short data
-      Async = 0b010, // Long, multi-buffered color/data windows
-      Flush = 0b100  // Cleanup and notify lvgl the transaction is complete
-    };
-
-    const Mode mode;
-    const Method method;
-
-    constexpr Context(
-      const Mode mode = Mode::Command,
-      const Method method = Method::Sync
-    )
-    : mode(mode), method(method) {}
-
-    template <typename ...M,
-      std::enable_if_t<(std::is_same_v<M, Method> && ...), int> = 0>
-    constexpr Context(
-      const Mode mode = Mode::Command,
-      M... m
-    )
-    : mode(mode),
-      method(static_cast<Method>(or_bits(static_cast<std::uint8_t>(m) ...))) {}
-
-    constexpr Context(
-      const Context &ctx
-    )
-    : mode(ctx.mode), method(ctx.method) {}
-
-    virtual ~Context() = default;
-
-    template <typename ...M,
-      std::enable_if_t<(std::is_same_v<M, Method> && ...), int> = 0>
-    bool uses(M... m) const noexcept {
-      return or_bits(static_cast<std::uint8_t>(m) ...) &
-        static_cast<std::uint8_t>(method);
-    }
-  };
-
-  std::size_t queued = 0;
-  std::size_t flushed = 0;
+  // Parameters for the GT911 touch controller.
+  static constexpr std::uint16_t i2c_reg_prod_id = 0x8140;
+  static constexpr std::size_t i2c_size_prod_id = 4U;
+  static constexpr std::uint16_t i2c_reg_stat = 0x814E; // buffer/track status
+  static constexpr std::uint16_t i2c_reg_base_point = 0x814F;
+  static constexpr std::size_t i2c_touch_max = 5U; // simultaneous touch points
 
 protected:
-  Thread _task;
-  SPI *_spi;
-  SPI::Device *_device;
-  SPI::Queue *_queue;
-  PWM *_backlight;
-  lv_display_t *_display;
-  lv_color_t *_fb[2];
+  using ioctrl_t = esp_lcd_panel_io_handle_t;
+  using ioconf_t = esp_lcd_panel_io_spi_config_t;
+  using notify_t = esp_lcd_panel_io_event_data_t *;
+  using driver_t = lv_display_t *;
+  using finger_t = lv_indev_t *;
+  using buffer_t = lv_color_t *;
+
+  struct __attribute__((packed)) Touch {
+    // attributes of an individual touch event, this structure is repeated
+    // contiguously in the following memory-mapped registers, which implements
+    // 5-point multi-touch tracking (in the hardware).
+    // however, the LCD graphics library (lvgl or TFT_eSPI/LoyvanGFX) currently
+    // supports single-touch only.
+    //   1. 0x814F—0x8156
+    //   2. 0x8157—0x815E
+    //   3. 0x815F—0x8166
+    //   4. 0x8167—0x816E
+    //   5. 0x816F—0x8176
+    std::uint8_t track;
+    std::uint16_t x;
+    std::uint16_t y;
+    std::uint16_t area;
+    // 1 pad byte makes 64 bits in (packed) struct
+    std::uint8_t _[1]; // Value is irrelevant
+  };
+
+  // Static function wrappers for LCD instance methods.
+  // These can be used as callback functions for the various C APIs.
+  // Be sure to initialize the *instance member! :)
+  template <typename T = LCD>
+  struct Callback {
+  public:
+    static esp_err_t init(T *target) {
+      if (target != nullptr) {
+        Critical::Section token = target->lock();
+        instance = const_cast<T *>(target);
+        return ESP_OK;
+      }
+      return ESP_ERR_INVALID_ARG;
+    }
+
+  protected:
+    // The following static callback functions should not be called directly.
+    //
+    // Instead, they are invoked by the ESP-IDF LCD component driver in response
+    // to hardware events and high-level API calls.
+    static fastcode void on_tick(void *arg) {
+      instance->on_tick(arg);
+    }
+    static fastcode void on_task(void *arg) {
+      instance->on_task(arg);
+    }
+    static fastcode bool after_tx(ioctrl_t ioctrl, notify_t notify, void *context) {
+      return instance->after_tx(ioctrl, notify, context);
+    }
+    static fastcode void on_tx_command(
+      lv_display_t *disp, const std::uint8_t *cmd, std::size_t cmd_size,
+      const std::uint8_t *param, std::size_t param_size
+    ) {
+      ESP_ERROR_CHECK_WITHOUT_ABORT(
+        instance->on_tx_command(disp, cmd, cmd_size, param, param_size)
+      );
+    }
+    static fastcode void on_tx_color(
+      lv_display_t *disp, const std::uint8_t *cmd, std::size_t cmd_size,
+      std::uint8_t *param, std::size_t param_size
+    ) {
+      ESP_ERROR_CHECK_WITHOUT_ABORT(
+        instance->on_tx_color(disp, cmd, cmd_size, param, param_size)
+      );
+    }
+    static fastcode void on_touch_read(
+      lv_indev_t *indev, lv_indev_data_t *data
+    ) {
+      instance->on_touch_read(indev, data);
+    }
+
+  protected:
+    // Because the *instance member is such a critical requirement when using
+    // this Callback wrapper class — the BSP cannot function without it — the
+    // static functions always assume it is non-null. Otherwise, the application
+    // will very appropriately crash.
+    //
+    // A good way to guarantee the above is to call the static Callback::init()
+    // function anywhere in the LCD constructor. It is guaranteed because all of
+    // of the callbacks are installed in the LCD::init() instance method.
+    static inline T *instance = nullptr;
+
+    // Expose the static functions _only_ to the callbacks' target class.
+    friend T;
+  };
 
 public:
   LCD()
-  : _spi(
+  : _task(nullptr),
+    _tim(
+      nullptr
+    ),
+    _spi(
       new SPI(
         LCD_SPI_HOST_ID,
         static_cast<gpio_num_t>(LCD_SPI_PIN_SDI),
@@ -527,19 +676,11 @@ public:
         spi_transfer_size
       )
     ),
-    _device(
-      new SPI::Device(
-        static_cast<gpio_num_t>(LCD_SPI_PIN_SEL),
-        static_cast<gpio_num_t>(LCD_SPI_PIN_SDC),
-        static_cast<int>(LCD_SPI_FREQ_HZ),
-        static_cast<int>(LCD_SPI_TX_POOL),
-        Callback<LCD, Context>::pre_tx,
-        Callback<LCD, Context>::post_tx
-      )
-    ),
-    _queue(
-      new SPI::Queue(
-        LCD_SPI_TX_POOL
+    _i2c(
+      new I2C(
+        LCD_I2C_PORT_ID,
+        static_cast<gpio_num_t>(LCD_I2C_PIN_SDA),
+        static_cast<gpio_num_t>(LCD_I2C_PIN_SCL)
       )
     ),
     _backlight(
@@ -550,10 +691,29 @@ public:
         static_cast<std::uint32_t>(LCD_PWM_FREQ_BLT)
       )
     ),
-    _display(nullptr),
-    _fb{nullptr, nullptr} {
+    _ioctrl(nullptr),
+    _ioconf(ioconf_t{
+      .cs_gpio_num = static_cast<gpio_num_t>(LCD_SPI_PIN_SEL),
+      .dc_gpio_num = static_cast<gpio_num_t>(LCD_SPI_PIN_SDC),
+      .spi_mode = 0,
+      .pclk_hz = LCD_SPI_FREQ_HZ,
+      .trans_queue_depth = LCD_SPI_DMA_QSZ,
+      .on_color_trans_done = Callback<LCD>::after_tx,
+      .user_ctx = this,
+      .lcd_cmd_bits = 8,
+      .lcd_param_bits = 8,
+      .flags = {
+        .dc_as_cmd_phase = 0,
+        .dc_low_on_data = 0,
+        .octal_mode = 0,
+        .lsb_first = 0
+      }
+    }),
+    _driver(nullptr),
+    _finger(nullptr),
+    _buffer{nullptr, nullptr} {
     ESP_ERROR_CHECK(
-      (Callback<LCD, Context>::init(this))
+      (Callback<LCD>::init(this))
     );
   }
 
@@ -561,25 +721,34 @@ public:
     if (_task != nullptr) {
       vTaskDelete(_task);
     }
+    if (_tim != nullptr) {
+      delete _tim;
+    }
+    if (_i2c != nullptr) {
+      delete _i2c;
+    }
     if (_spi != nullptr) {
       delete _spi;
-    }
-    if (_device != nullptr) {
-      delete _device;
-    }
-    if (_queue != nullptr) {
-      delete _queue;
     }
     if (_backlight != nullptr) {
       delete _backlight;
     }
-    if (_display != nullptr) {
-      lv_display_delete(_display);
-      free(_display);
+    if (_finger != nullptr) {
+      lv_indev_delete(_finger);
+      _finger = nullptr;
+    }
+    if (_ioctrl != nullptr) {
+      _ioctrl->del(_ioctrl);
+      _ioctrl = nullptr;
+    }
+    if (_driver != nullptr) {
+      lv_display_delete(_driver);
+      _driver = nullptr;
     }
     for (int i = 0; i < 2; i++) {
-      if (_fb[i] != nullptr) {
-        heap_caps_free(_fb[i]);
+      if (_buffer[i] != nullptr) {
+        heap_caps_free(_buffer[i]);
+        _buffer[i] = nullptr;
       }
     }
   }
@@ -590,25 +759,27 @@ public:
 
     lv_init();
 
-    lv_tick_set_cb(xTaskGetTickCount);
+    // _tim = new TIM(
+    //   "LCD::on_tick",
+    //   Callback<LCD>::on_tick,
+    //   this
+    // );
 
-    log_trace("initializing GPIO pins");
+    // ESP_RETURN_ON_FALSE(
+    //   _tim != nullptr, ESP_ERR_INVALID_STATE,
+    //   TAG, "invalid tick timer"
+    // );
 
-    gpio_config_t io_conf = {
-      .pin_bit_mask = or_bits(
-        1ULL << LCD_SPI_PIN_SEL, // CS
-        1ULL << LCD_SPI_PIN_SDC, // DC/RS
-        1ULL << LCD_PWM_PIN_BLT  // Backlight
-      ),
-      .mode = GPIO_MODE_OUTPUT,
-      .pull_up_en = GPIO_PULLUP_DISABLE,
-      .pull_down_en = GPIO_PULLDOWN_DISABLE,
-    };
-    gpio_config(&io_conf);
+    // log_trace("initializing tick timer");
 
-    gpio_set_level(static_cast<gpio_num_t>(LCD_SPI_PIN_SDC), 1); // DC/RS: data mode
-    gpio_set_level(static_cast<gpio_num_t>(LCD_PWM_PIN_BLT), 0); // Backlight: off
-    gpio_set_level(static_cast<gpio_num_t>(LCD_SPI_PIN_SEL), 0); // CS: active
+    // ESP_RETURN_ON_ERROR(
+    //   _tim->init(true),
+    //   TAG, "failed to initialize tick timer"
+    // );
+
+    log_trace("installing tick callback");
+
+    lv_tick_set_cb(millis);
 
     ESP_RETURN_ON_FALSE(
       _backlight != nullptr, ESP_ERR_INVALID_STATE,
@@ -629,45 +800,43 @@ public:
       TAG, "invalid SPI interface for LCD"
     );
 
-    log_trace("attaching LCD device to SPI bus");
+    log_trace("initializing I²C bus");
 
     ESP_RETURN_ON_ERROR(
-      _device->init([&](SPI::Device *dev) {
-        return _spi->add(dev);
-      }),
-      TAG, "failed to attach LCD device to SPI bus"
+      _i2c->init(),
+      TAG, "invalid I²C interface for LCD"
     );
 
-    log_trace("initializing SPI transaction queue");
+    log_trace("attaching LCD to SPI bus");
 
     ESP_RETURN_ON_ERROR(
-      _queue->init(),
-      TAG, "failed to initialize SPI transaction queue"
+      esp_lcd_new_panel_io_spi(
+        // For some reason, esp_lcd_spi_bus_handle_t is an alias for void*, even
+        // though internally it is used as an enum value (which is what we pass
+        // as argument as well (before the cast)). Seems like a bug in ESP-IDF.
+        (esp_lcd_spi_bus_handle_t)(_spi->host()),
+        &_ioconf, &_ioctrl),
+      TAG, "failed to attach LCD to SPI bus"
     );
 
     log_trace("creating LCD display driver");
 
-    _display = lv_st7796_create(
-      LCD_PHY_RES_X,
-      LCD_PHY_RES_Y,
-      LV_LCD_FLAG_NONE,
-      Callback<LCD, Context>::cmd,
-      Callback<LCD, Context>::color
-    );
+    _driver = lv_st7796_create(LCD_PHY_RES_X, LCD_PHY_RES_Y, LV_LCD_FLAG_NONE,
+      Callback<LCD>::on_tx_command, Callback<LCD>::on_tx_color);
 
     ESP_RETURN_ON_FALSE(
-      _display != nullptr, ESP_ERR_INVALID_STATE,
+      _driver != nullptr, ESP_ERR_INVALID_STATE,
       TAG, "failed to create LCD display driver"
     );
 
     log_trace("allocating LCD framebuffers");
 
     for (int i = 0; i < 2; i++) {
-      _fb[i] = static_cast<lv_color_t *>(
+      _buffer[i] = static_cast<lv_color_t *>(
         heap_caps_malloc(spi_transfer_size, LCD_SPI_DMA_CAP)
       );
       ESP_RETURN_ON_FALSE(
-        _fb[i] != nullptr, ESP_ERR_NO_MEM,
+        _buffer[i] != nullptr, ESP_ERR_NO_MEM,
         TAG, "failed to allocate LCD framebuffer"
       );
     }
@@ -675,17 +844,31 @@ public:
     log_trace("installing LCD framebuffers");
 
     lv_display_set_buffers(
-      _display,
-      _fb[0],
-      _fb[1],
+      _driver,
+      _buffer[0],
+      _buffer[1],
       spi_transfer_size,
       LV_DISPLAY_RENDER_MODE_PARTIAL
     );
 
+    log_trace("creating touch input driver");
+
+    _finger = lv_indev_create();
+
+    ESP_RETURN_ON_FALSE(
+      _finger != nullptr, ESP_ERR_INVALID_STATE,
+      TAG, "failed to create touch input driver"
+    );
+
+    log_trace("initializing touch input driver");
+
+    lv_indev_set_type(_finger, LV_INDEV_TYPE_POINTER);
+    lv_indev_set_read_cb(_finger, Callback<LCD>::on_touch_read);
+
     log_trace("initializing LCD root view");
 
     ESP_RETURN_ON_ERROR(
-      view->init(nullptr),
+      view->init(lv_screen_active()),
       TAG, "failed to initialize LCD root view"
     );
 
@@ -693,7 +876,7 @@ public:
 
     ESP_RETURN_ON_FALSE(
       pdPASS == xTaskCreate(
-        Callback<LCD, Context>::task,
+        Callback<LCD>::on_task,
         FREERTOS_LVGL_TASK_NAME,
         FREERTOS_LVGL_TASK_STACK_SIZE,
         view,
@@ -703,219 +886,198 @@ public:
       TAG, "failed to create RTOS thread for LCD"
     );
 
-    log_trace("successfully initialized LCD");
+    log_trace("successfully initialized LCD, turning display on");
+
+    set_backlight(0.75f);
 
     return ESP_OK;
   }
 
-  inline void task(void *arg) {
+  inline void on_tick(void *arg) {
+    auto elapsed = _tim->elapsed().count();
+    lv_tick_inc(elapsed);
+    // log_trace("tick: %u", now - last);
+  }
+  inline void on_task(void *arg) {
     // xTaskDelayUntil arguments are expressed in units of system "ticks".
     // Conventionally, 1 tick = 1 millisecond regardless of CPU frequency.
     View *view = static_cast<View *>(arg);
-    TickType_t last = xTaskGetTickCount();
+    auto last = xTaskGetTickCount();
     for (;;) {
   #ifndef TASK_SCHED_GREEDY
       if /* conditionally run func() iff time has elapsed */
   #endif
-      (xTaskDelayUntil(&last, view->refresh_hz())) {
+      (xTaskDelayUntil(&last, view->refresh_rate())) {
+        Critical::Section token = lock();
         lv_timer_handler();
         view->update(msecu32());
       }
     }
   }
-
-  inline fastcode void pre_tx(spi_transaction_t *trx) {
-    // log_trace("pre_tx-transaction callback start");
-    gpio_set_level(_device->cs_pin, 0);
-    if (trx != nullptr && trx->user != nullptr) {
-      Context *ctx = static_cast<Context *>(trx->user);
-      gpio_set_level(_device->dc_pin, static_cast<std::uint32_t>(ctx->mode));
-    }
-    // log_trace("pre_tx-transaction callback end");
+  inline bool after_tx(ioctrl_t ioctrl, notify_t notify, void *context) {
+    lv_display_flush_ready(_driver);
+    return false; // Whether a high-priority task was scheduled.
   }
-
-  inline fastcode void post_tx(spi_transaction_t *trx) {
-    if (trx != nullptr && trx->user != nullptr) {
-      // The post_tx-transaction callback is called even during the creation of
-      // the display driver (when sending SPI init commands).
-      // The _display member will still be uninitialized at this point (only).
-      if (_display != nullptr) {
-        Context *ctx = static_cast<Context *>(trx->user);
-        if (ctx->uses(Context::Method::Flush)) {
-          lv_disp_flush_ready(_display);
-          auto token = lock();
-          ++flushed;
-        }
-        delete ctx;
-      }
-      trx->user = nullptr;
-      gpio_set_level(_device->cs_pin, 1);
-    }
-  }
-
-  inline void transmit(
-    std::uint8_t *data, std::size_t size, Context ctx = Context()
+  inline esp_err_t on_tx_command(
+    lv_display_t *disp, const std::uint8_t *cmd, std::size_t cmd_size,
+    const std::uint8_t *param, std::size_t param_size
   ) {
-    if (size == 0) { return; }
-
-    spi_transaction_t trx {
-      .flags = 0,
-      .length = size << 3,
-      .user = new Context(ctx)
-    };
-
-    if (size <= sizeof(trx.tx_data) && data != nullptr) {
-      trx.flags |= SPI_TRANS_USE_TXDATA;
-      memcpy(trx.tx_data, data, size);
-    } else {
-      trx.tx_buffer = data;
-    }
-
-    if (ctx.uses(Context::Method::Sync)) {
-      const char *fsz = (ctx.mode == Context::Mode::Command) ?
-        "S [%lu] " : " S[%lu] ";
-      // before polling, all previous pending transactions need to be serviced
-      _queue->yield(_device, LCD_SPI_TX_POOL);
-      if (trx.flags & SPI_TRANS_USE_TXDATA) {
-        print_buffer(trx.tx_data, size, true, fsz);
-      } else {
-        print_buffer(trx.tx_buffer, size, true, fsz);
-      }
-      spi_device_polling_transmit(_device->handle, &trx);
-    } else {
-      const char *fsz = (ctx.mode == Context::Mode::Command) ?
-        "A [%lu] " : " A[%lu] ";
-      // if necessary, ensure we can queue new transactions by servicing some
-      // previous transactions
-      if (_queue->is_full()) {
-        _queue->yield(_device, LCD_SPI_TX_RESV);
-      }
-
-		  spi_transaction_t *pit = nullptr;
-      _queue->receive(pit, portMAX_DELAY);
-      memcpy(pit, &trx, sizeof(trx));
-      if (trx.flags & SPI_TRANS_USE_TXDATA) {
-        print_buffer(pit->tx_data, size, true, fsz);
-      } else {
-        print_buffer(pit->tx_buffer, size, true, fsz);
-      }
-      if (spi_device_queue_trans(_device->handle, pit, portMAX_DELAY) != ESP_OK) {
-        // send failed transaction back to the pool to be reused
-        _queue->send(pit, portMAX_DELAY);
-      } else {
-        auto token = lock();
-        ++queued;
-      }
-    }
+    int tx_cmd = 0;
+    lv_memcpy(&tx_cmd, cmd, std::min(sizeof(int), cmd_size));
+    ESP_RETURN_ON_ERROR(
+      esp_lcd_panel_io_tx_param(_ioctrl, tx_cmd, param, param_size),
+      TAG, "failed to transmit command to LCD"
+    );
+    return ESP_OK;
+  }
+  inline esp_err_t on_tx_color(
+    lv_display_t *disp, const std::uint8_t *cmd, std::size_t cmd_size,
+    std::uint8_t *param, std::size_t param_size
+  ) {
+    int tx_cmd = 0;
+    lv_memcpy(&tx_cmd, cmd, std::min(sizeof(int), cmd_size));
+    lv_draw_sw_rgb565_swap(param, param_size);
+    ESP_RETURN_ON_ERROR(
+      esp_lcd_panel_io_tx_color(_ioctrl, tx_cmd, param, param_size),
+      TAG, "failed to transmit color to LCD"
+    );
+    return ESP_OK;
   }
 
-  inline SPI *spi() noexcept { return _spi; }
-  inline SPI::Device *device() noexcept { return _device; }
-  inline SPI::Queue *queue() noexcept { return _queue; }
-  inline PWM *backlight() noexcept { return _backlight; }
-  inline lv_display_t *display() noexcept { return _display; }
-  inline lv_color_t *fb(std::size_t i) noexcept { return _fb[i&1]; }
+  inline void on_touch_read(lv_indev_t *indev, lv_indev_data_t *data) {
+    static Touch last = { .x = 0, .y = 0 };
+    std::size_t count = count_touches();
+    switch (count) {
+      case 1: {
+        Touch pt;
+        if (ESP_OK == map_touches(&pt, 1)) {
+          // log_trace("mapped to: %d %d", pt.x, pt.y);
+          last = pt;
+          data->state = LV_INDEV_STATE_PRESSED;
+          data->point = { .x = last.x, .y = last.y };
+        }
+        break;
+      }
+      default: {
+        // log_trace("releasing touch");
+        data->state = LV_INDEV_STATE_RELEASED;
+        data->point = { .x = last.x, .y = last.y };
+        break;
+      }
+    }
+    log_trace(
+      "[%d] %10s @ (%d, %d)",
+      count,
+      (data->state == LV_INDEV_STATE_PRESSED ? "pressed" : "released"),
+      data->point.x,
+      data->point.y
+    );
+  }
 
 protected:
-  // Static function wrappers for LCD instance methods.
-  // These can be used as callback functions for the various C APIs.
-  // Be sure to initialize the *instance member! :)
-  template <typename T = LCD, typename C = Context>
-  struct Callback {
-  protected:
-    static inline T *instance = nullptr;
+  inline std::size_t count_touches() {
+    static std::uint8_t stat = 0;
+    std::size_t count = 0;
 
-  public:
-    static esp_err_t init(const T *target) {
-      if (target != nullptr) {
-        instance = const_cast<T *>(target);
-        return ESP_OK;
-      }
-      return ESP_ERR_INVALID_ARG;;
+    // log_trace("reading touch status");
+
+    ESP_ERROR_CHECK_WITHOUT_ABORT(
+      _i2c->reg_rx(LCD_I2C_DEV_ADD, i2c_reg_stat, &stat, sizeof(stat))
+    );
+    // log_trace("raw touch stat: %d", stat);
+
+    count = static_cast<std::size_t>(stat) & 0xFFul;
+    stat = 0;
+
+    if (((count & 0x80ul) > 0) && ((count & 0x0Ful) < i2c_touch_max)) {
+      ESP_ERROR_CHECK_WITHOUT_ABORT(
+        _i2c->reg_tx<0>(LCD_I2C_DEV_ADD, i2c_reg_stat)
+      );
+      count &= 0x0Ful;
     }
+    return count;
+  }
+  inline esp_err_t map_touches(Touch *const pt, const std::size_t count) {
+    static constexpr std::size_t max_size = sizeof(Touch) * i2c_touch_max;
+    static std::uint8_t rx_buff[max_size];
 
-    static void task(void *arg) {
-      if (instance != nullptr) {
-        instance->task(arg);
-      }
-    }
+    lv_display_rotation_t rotation = lv_display_get_rotation(_driver);
+    std::int32_t width_px = lv_display_get_horizontal_resolution(_driver);
+    std::int32_t height_px = lv_display_get_vertical_resolution(_driver);
 
-    static fastcode void pre_tx(spi_transaction_t *trx) {
-      if (instance != nullptr) {
-        instance->post_tx(trx);
-      }
-    }
+    lv_memset(rx_buff, 0, max_size);
 
-    static fastcode void post_tx(spi_transaction_t *trx) {
-      if (instance != nullptr) {
-        instance->post_tx(trx);
-      }
-    }
+    const std::size_t rx_size = std::min(max_size, sizeof(Touch) * count);
+    esp_err_t err = _i2c->reg_rx(
+      LCD_I2C_DEV_ADD, i2c_reg_base_point, rx_buff, rx_size
+    );
+    lv_memcpy(pt, rx_buff, rx_size);
 
-    static inline void cmd(
-      lv_display_t *disp, const std::uint8_t *cmd, std::size_t cmd_size,
-      const std::uint8_t *param, std::size_t param_size
-    ) {
-      if (instance != nullptr) {
-        spi_device_acquire_bus(
-          instance->device()->handle,
-          portMAX_DELAY
-        );
+    // log_trace("raw touch data: x=%d y=%d", pt->x, pt->y);
 
-        //bswap(const_cast<std::uint8_t *>(cmd), 8, cmd_size);
-        gpio_set_level(static_cast<gpio_num_t>(LCD_SPI_PIN_SDC), 0);
-        gpio_set_level(static_cast<gpio_num_t>(LCD_SPI_PIN_SEL), 0);
-        instance->transmit(
-          const_cast<std::uint8_t *>(cmd), cmd_size,
-          Context(Context::Mode::Command, Context::Method::Sync)
-        );
-        gpio_set_level(static_cast<gpio_num_t>(LCD_SPI_PIN_SDC), 1);
-        //bswap(const_cast<std::uint8_t *>(param), 8, param_size);
-        instance->transmit(
-          const_cast<std::uint8_t *>(param), param_size,
-          Context(Context::Mode::Data, Context::Method::Sync)
-        );
-
-        gpio_set_level(static_cast<gpio_num_t>(LCD_SPI_PIN_SEL), 1);
-        spi_device_release_bus(instance->device()->handle);
-      }
-    }
-
-    static inline void color(
-      lv_display_t *disp, const std::uint8_t *cmd, std::size_t cmd_size,
-      std::uint8_t *param, std::size_t param_size
-    ) {
-      if (instance != nullptr) {
-        spi_device_acquire_bus(
-          instance->device()->handle,
-          portMAX_DELAY
-        );
-
-        //bswap(const_cast<std::uint8_t *>(cmd), 8, cmd_size);
-        gpio_set_level(static_cast<gpio_num_t>(LCD_SPI_PIN_SDC), 0);
-        gpio_set_level(static_cast<gpio_num_t>(LCD_SPI_PIN_SEL), 0);
-        instance->transmit(
-          const_cast<std::uint8_t *>(cmd), cmd_size,
-          Context(Context::Mode::Command, Context::Method::Sync)
-        );
-        gpio_set_level(static_cast<gpio_num_t>(LCD_SPI_PIN_SDC), 1);
-        for (std::size_t i = 0; i < param_size; i += 2) {
-          byte_swap(param + i, 2);
+    switch (rotation) {
+      case LV_DISPLAY_ROTATION_0: {
+        for (std::uint8_t i = 0; i < count; ++i) {
+          pt[i].x = width_px - pt[i].x;
+          pt[i].y = height_px - pt[i].y;
         }
-        instance->transmit(
-          const_cast<std::uint8_t *>(param), param_size,
-          Context(
-            Context::Mode::Data,
-            Context::Method::Sync,
-            Context::Method::Flush
-          )
-        );
-
-        gpio_set_level(static_cast<gpio_num_t>(LCD_SPI_PIN_SEL), 1);
-        spi_device_release_bus(instance->device()->handle);
+        break;
+      }
+      case LV_DISPLAY_ROTATION_90: {
+        std::uint16_t swap;
+        for (std::uint8_t i = 0; i < count; ++i) {
+          swap = pt[i].x;
+          pt[i].x = pt[i].y;
+          pt[i].y = height_px - swap;
+        }
+        break;
+      }
+      case LV_DISPLAY_ROTATION_180: {
+        for (std::uint8_t i = 0; i < count; ++i) {
+          pt[i].x = pt[i].x;
+          pt[i].y = pt[i].y;
+        }
+        break;
+      }
+      case LV_DISPLAY_ROTATION_270: {
+        std::uint16_t swap;
+        for (std::uint8_t i = 0; i < count; ++i) {
+          swap = pt[i].x;
+          pt[i].x = width_px - pt[i].y;
+          pt[i].y = swap;
+        }
+        break;
       }
     }
-  };
+
+    // log_trace("mapped touch data: x=%d y=%d", pt->x, pt->y);
+
+    return err;
+  }
+
+public:
+  // Set the backlight level in the range [0=OFF, 255=MAX].
+  inline esp_err_t set_backlight(const PWM::level_t level) {
+    return _backlight->set(level);
+  }
+  // Set the backlight level as a ratio in the range [0.0=OFF, 1.0=MAX].
+  inline esp_err_t set_backlight(const float ratio) {
+    return _backlight->set(ratio);
+  }
+  inline lv_display_t *display() { return _driver; }
+
+protected:
+  Thread _task;
+  TIM *_tim;
+  SPI *_spi;
+  I2C *_i2c;
+  PWM *_backlight;
+
+  ioctrl_t _ioctrl;
+  ioconf_t _ioconf;
+  driver_t _driver;
+  finger_t _finger;
+  buffer_t _buffer[2];
 };
 
 #pragma endregion "Hardware peripheral singletons"

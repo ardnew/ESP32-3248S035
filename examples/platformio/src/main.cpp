@@ -81,7 +81,7 @@ bsp::LCD *lcd = new bsp::LCD();
 Main *view = new Main(lcd);
 
 void setup() {
-  vTaskDelay(1000 / portTICK_PERIOD_MS);
+  vTaskDelay(1000_ms);
 
   ESP_ERROR_CHECK(
     lcd->init(view)

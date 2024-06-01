@@ -31,7 +31,19 @@
   "headers": [
     "esp323248s035.hpp"
   ],
-  "scripts": {
-    "postinstall": "scripts/platformio/postinstall.py"
+  "export": {
+    "include": [
+      "boards",
+      "docs",
+      "examples",
+      "include",
+      "scripts",
+      "library.json",
+      "LICENSE*",
+      "README*"
+    ],
+    "exclude": [
+      ".pio"
+    ]
   }
 }
