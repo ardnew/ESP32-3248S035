@@ -1,6 +1,6 @@
 {
   "name": "ESP32-3248S035",
-  "version": "0.3.0",
+  "version": "0.3.1",
   "description": "C++ board support package, DMA-enabled lvgl driver, and root view controller for Sunton ESP32-3248S035",
   "keywords": "ESP32-3248S035, ESP32-3248S035C, ESP32, ST7796, ST7796S, GT911, lvgl, DMA, PlatformIO, ESP-IDF, Arduino, C++, C++17",
   "homepage": "https://github.com/ardnew/ESP32-3248S035",
