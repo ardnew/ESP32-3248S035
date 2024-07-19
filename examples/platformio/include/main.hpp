@@ -1,8 +1,11 @@
 #pragma once
 
+#include <lvgl.h>
 #include <esp323248s035.hpp>
 
-static void btn_event_cb(lv_event_t *e) {
+extern "C" void app_main(void);
+
+extern "C" void btn_event_cb(lv_event_t *e) {
   log_trace("button event");
   lv_event_code_t code = lv_event_get_code(e);
   lv_obj_t *btn = static_cast<lv_obj_t *>(lv_event_get_target(e));
@@ -42,7 +45,7 @@ public:
     _btn = lv_button_create(root);     /*Add a button the current screen*/
     lv_obj_set_pos(_btn, 10, 10);                            /*Set its position*/
     lv_obj_set_size(_btn, 120, 50);                          /*Set its size*/
-    lv_obj_add_event_cb(_btn, btn_event_cb, LV_EVENT_ALL, NULL);           /*Assign a callback to the button*/
+    lv_obj_add_event_cb(_btn, btn_event_cb, LV_EVENT_CLICKED, NULL);           /*Assign a callback to the button*/
 
     _lbl = lv_label_create(_btn);          /*Add a label to the button*/
     lv_label_set_text(_lbl, "Button");                     /*Set the labels text*/
@@ -51,14 +54,15 @@ public:
     return ESP_OK;
   }
 
-  void update(msecu32_t const now) override {
-
-    // printf("update(%u)\n", now.count());
-    // lv_obj_set_style_bg_color(lv_scr_act(), lv_color_make(now.count() % 0xFF, 0, 0), 0);
+  esp_err_t update(TickType_t const now) override {
+    // printf("update(%lld)\n", now);
+    // lv_obj_set_style_bg_color(lv_scr_act(), lv_color_hex(static_cast<std::uint32_t>(now)), 0);
+    log_trace("update main view (ticks() = %lu)", now);
+    return ESP_OK;
   }
 
-  inline std::uint32_t refresh_rate() const noexcept override {
-    return 20_ms;
+  inline TickType_t refresh_rate() const noexcept override {
+    return pdMS_TO_TICKS((1000ms).count());
   }
 
   inline std::string title() override {

@@ -8,9 +8,14 @@
 #pragma region "Include dependencies"
 
 // ESP-IDF SDK
+#include <esp_idf_version.h>
 #include <esp_check.h>
 #include <esp_err.h>
-#include <esp_task_wdt.h>
+#include <freertos/FreeRTOS.h>
+#include <freertos/semphr.h>
+#include <freertos/portmacro.h>
+// #include <esp_task_wdt.h>
+#include <esp_freertos_hooks.h>
 #include <esp_lcd_panel_commands.h>
 #include <esp_lcd_panel_interface.h>
 #include <esp_lcd_panel_io_interface.h>
@@ -18,19 +23,20 @@
 #include <esp_lcd_panel_vendor.h>
 #include <esp_lcd_panel_ops.h>
 #include <driver/gpio.h>
+#include <rom/gpio.h>
 #include <driver/ledc.h>
 #include <driver/spi_master.h>
 #include <driver/spi_common.h>
+#if ESP_IDF_VERSION >= ESP_IDF_VERSION_VAL(5, 0, 0)
+#include <esp_private/spi_common_internal.h>
+#else
 #include <driver/spi_common_internal.h>
+#endif
 #include <driver/i2c.h>
 #include <soc/ledc_periph.h>
-#include <freertos/FreeRTOS.h>
-#include <freertos/task.h>
-#include <freertos/queue.h>
 // External libraries
 #include <lvgl.h>
 #include <drivers/display/st7796/lv_st7796.h>
-#include <cronos.hpp>
 // C++ stdlib
 #include <algorithm>
 #include <chrono>
@@ -41,6 +47,10 @@
 #include <utility>
 #include <vector>
 #include <limits>
+#include <cinttypes>
+// Local/project headers
+// #include "cxx/util.hpp"
+// #include "bsp/usec.hpp"
 
 #pragma endregion "Include dependencies"
 // -----------------------------------------------------------------------------
@@ -59,18 +69,7 @@
 // -----------------------------------------------------------------------------
 #pragma region "User-defined literals"
 
-// Convert common duration/period units to CPU ticks. These are mostly intended
-// for the user's implementation of Controller::refresh_rate().
-static inline constexpr auto operator ""_Hz(unsigned long long hz)
-  { return pdMS_TO_TICKS(configTICK_RATE_HZ / hz); }
-static inline constexpr auto operator ""_kHz(unsigned long long kHz)
-  { return pdMS_TO_TICKS(configTICK_RATE_HZ / (1000ULL * kHz)); }
-static inline constexpr auto operator ""_us(unsigned long long us)
-  { return pdMS_TO_TICKS(us / 1000ULL); }
-static inline constexpr auto operator ""_ms(unsigned long long ms)
-  { return pdMS_TO_TICKS(ms); }
-static inline constexpr auto operator ""_s(unsigned long long s)
-  { return pdMS_TO_TICKS(1000ULL * s); }
+using namespace std::literals::chrono_literals;
 
 #pragma endregion "User-defined literals"
 // -----------------------------------------------------------------------------
@@ -83,12 +82,32 @@ static inline constexpr auto operator ""_s(unsigned long long s)
 //
 #pragma region "Board-support package API"
 
+#if NUM_TASKS_TRACED
+
+extern "C" {
+  extern SemaphoreHandle_t sync_lvgl_task;
+  extern SemaphoreHandle_t sync_stats_task;
+  extern void stats_task(void *arg);
+}
+
+#endif
+
 namespace bsp {
 
 // -----------------------------------------------------------------------------
+#pragma region "Type traits"
+
+// template <typename>   struct return_type;
+// template <typename R> struct return_type<R()> { using type = R; };
+
+#pragma endregion "Type traits"
+// -----------------------------------------------------------------------------
 #pragma region "Type aliases"
 
-using Thread = TaskHandle_t;
+// template <typename T>
+// using return_type_t = typename return_type<T>::type;
+
+// using ticks_t = std::chrono::duration<TickType_t, std::ratio<1, configTICK_RATE_HZ>>;
 
 #pragma endregion "Type aliases"
 // -----------------------------------------------------------------------------
@@ -97,7 +116,42 @@ using Thread = TaskHandle_t;
 // TAG is required by the ESP-IDF logging system.
 static inline constexpr char TAG[] = "ESP32-3248S035";
 
+struct LVGLTask {
+  static constexpr std::size_t size = FREERTOS_LVGL_TASK_STACK_SIZE;
+  static inline StackType_t stack[size] = { 0 };
+  static inline StaticTask_t task {};
+};
+
 #pragma endregion "Global constants"
+// -----------------------------------------------------------------------------
+#pragma region "Utility classes"
+
+// struct Tick : std::chrono::duration<TickType_t, std::ratio<1, configTICK_RATE_HZ>> {
+
+//   Tick() = default;
+//   Tick(const Tick &) = default;
+//   Tick(Tick &&) = default;
+//   Tick &operator=(const Tick &) = default;
+//   Tick &operator=(Tick &&) = default;
+
+//   // Convert TickType_t. This enables implicit conversion to and from the native
+//   // FreeRTOS type (used throughout the ESP-IDF SDK).
+//   Tick(const TickType_t &ticks): duration(ticks) {}
+//   inline operator TickType_t() const noexcept { return count(); }
+
+//   // Convert arbitrary duration. These enables implicit conversion to and from:
+//   //  - Any of the standard duration types (e.g., std::chrono::seconds), and
+//   //  - Any of the std::literals::chrono_literals (e.g., 1s, 200ms, 3h, etc.).
+
+//   template <typename Rep, typename Period>
+//   Tick(const std::chrono::duration<Rep, Period> &dur)
+//     : duration(std::chrono::duration_cast<duration>(dur)) {}
+//   template <typename Rep, typename Period>
+//   inline operator std::chrono::duration<Rep, Period>() const
+//     { return std::chrono::duration_cast<std::chrono::duration<Rep, Period>>(*this); }
+// };
+
+#pragma endregion "Utility classes"
 // -----------------------------------------------------------------------------
 #pragma region "Pure abstract interfaces"
 
@@ -112,7 +166,7 @@ struct Critical : std::mutex {
   // the derived class can prevent concurrent access to any number of critical
   // sections (CSs) nested within otherwise unrelated methods (e.g., methods
   // that utilize the same hardware resource in methods Tx() and Rx()).
-  virtual inline volatile Section lock()
+  virtual inline Section lock()
     { return Section(*this); }
 
   // If a derived class needs to guard a critical section (CS) based on some
@@ -128,20 +182,11 @@ struct Initer {
 };
 
 struct Updater {
-  virtual void update(msecu32_t const) = 0;
+  virtual esp_err_t update(TickType_t const) = 0;
 };
 
 template <typename ...T>
 struct Controller : Critical, Initer<T...>, Updater {
-  // "WTF?" you might ask, "I have to define refresh rate in CPU ticks?"
-  // Alas, dear reader — yes, you must. But! Fear not, for I have provided
-  // some snazzy user-defined literals that justify this nonsense.
-  //
-  // For example, 30_Hz, 20_ms, 6789_kHz, and 1_s are all valid, self-evident,
-  // and self-documenting values.
-  //
-  // BONUS: The user-defined literals can actually be used anywhere a TickType_t
-  // value is expected (delays, timers, frequencies, etc.).
   virtual TickType_t refresh_rate() const noexcept = 0;
 };
 
@@ -152,10 +197,6 @@ struct View : Controller<lv_obj_t *> {
 #pragma endregion "Pure abstract interfaces"
 // -----------------------------------------------------------------------------
 #pragma region "Utility functions"
-
-// Return current tick count in milliseconds.
-static inline std::uint32_t millis() noexcept
-  { return pdTICKS_TO_MS(xTaskGetTickCount()); }
 
 // Combine words at compile-time using bitwise operators.
 //
@@ -184,93 +225,181 @@ template <typename ...U> inline void log_write(U... u)
 template <typename ...U> inline void log_error(U... u)
   { fprintf(stderr, u...); }
 
-void print_buffer(
-  const void *buf, std::size_t len, const bool eol = true,
-  const char *fsz = "[%lu] ", const char *fmt = "%02X "
-) {
-  std::size_t total = std::min(len, static_cast<std::size_t>(32));
-  std::size_t limit = len > total ? total / 2 : len;
-  printf(fsz, len);
-  for (std::size_t i = 0; i < limit; ++i) {
-    printf(fmt, static_cast<const std::uint8_t *>(buf)[i]);
-  }
-  if (len > total) {
-    printf(" ..<%lu>.. ", len - total);
-    for (std::size_t i = len - limit; i < len; ++i) {
-      printf(fmt, static_cast<const std::uint8_t *>(buf)[i]);
-    }
-  }
-  if (eol) { printf("\n"); }
-}
+// Return the number of milliseconds since boot.
+static inline std::uint32_t millis() { return esp_timer_get_time() / 1000; }
+static inline TickType_t ticks() { return pdMS_TO_TICKS(millis()); }
+
+// Convert a CPU core ID to affinity.
+static inline esp_intr_cpu_affinity_t core_affinity(const BaseType_t core_id)
+  { return static_cast<esp_intr_cpu_affinity_t>(core_id + 1); }
 
 #pragma endregion "Utility functions"
 // -----------------------------------------------------------------------------
 #pragma region "Hardware abstractions"
 
-struct TIM : Critical, Initer<const bool> {
-public:
-  using duration_t = native::ticker::duration;
+// struct Microseconds
+// {
+//   using type = return_type_t<decltype(esp_timer_get_time)>;
 
-public:
-  TIM(
-    const std::string &name, // Unique name to give timer
-    const esp_timer_cb_t &cb, // Periodic callback
-    // Optional parameters
-    void *arg = nullptr, // Argument passed to callback
-    const duration_t &period = msecu32_t{pdTICKS_TO_MS(LCD_TICK_RATE)}
-  )
-  : _args(esp_timer_create_args_t{
-      .callback = cb,
-      .arg = arg,
-      .dispatch_method = ESP_TIMER_TASK, // ISR method NOT supported on ESP32
-      .name = name.c_str(),
-      .skip_unhandled_events = false,
-    }),
-    _handle(nullptr),
-    _period(period),
-    _since(msecu32()) {}
+//   virtual ~Microseconds() = delete;
 
-  virtual ~TIM() {
-    if (_handle != nullptr) {
-      ESP_ERROR_CHECK(
-        esp_timer_delete(_handle)
-      );
-    }
-  }
+//   template <typename MillisType = std::uint32_t,
+//     std::enable_if_t<std::is_integral_v<MillisType>, int> = 0>
+//   static constexpr type from_milliseconds(const MillisType msecs) noexcept {
+//     return static_cast<type>(msecs) * 1000LL;
+//   }
 
-  virtual esp_err_t init(const bool begin = true) override {
-    {
-      auto token = lock();
-      ESP_ERROR_CHECK(
-        esp_timer_create(&_args, &_handle)
-      );
-    }
-    if (begin) {
-      return start();
-    }
-    return ESP_OK;
-  }
+//   template <typename MillisType = std::uint32_t,
+//     std::enable_if_t<std::is_integral_v<MillisType>, int> = 0>
+//   static constexpr MillisType to_milliseconds(const type usecs) noexcept {
+//     return static_cast<MillisType>(usecs) / 1000LL;
+//   }
 
-  inline esp_err_t start() {
-    return esp_timer_start_periodic(_handle, _period.count());
-  }
+//   static constexpr type from_ticks(const TickType_t ticks) noexcept {
+//     return from_milliseconds(pdTICKS_TO_MS(ticks));
+//   }
 
-  inline esp_err_t stop() {
-    return esp_timer_stop(_handle);
-  }
+//   static constexpr TickType_t to_ticks(const type usecs) noexcept {
+//     return pdMS_TO_TICKS(to_milliseconds(usecs));
+//   }
 
-  inline auto elapsed() noexcept {
-    const auto last = _since;
-    _since = msecu32();
-    return _since - last;
-  }
+//   static inline type uptime() noexcept {
+//     return esp_timer_get_time();
+//   }
 
-protected:
-  const duration_t _period;
-  const esp_timer_create_args_t _args;
-  esp_timer_handle_t _handle;
-  msecu32_t _since;
-};
+//   template <typename MillisType = std::uint32_t,
+//     std::enable_if_t<std::is_integral_v<MillisType>, int> = 0>
+//   static inline MillisType uptime_milliseconds() noexcept {
+//     return to_milliseconds(uptime());
+//   }
+
+//   static inline TickType_t uptime_ticks() noexcept {
+//     return to_ticks(uptime());
+//   }
+
+//   static inline type elapsed(type &since) {
+//     const type begin = since;
+//     return (since = uptime()) - begin;
+//   }
+
+//   template <typename MillisType = std::uint32_t,
+//     std::enable_if_t<std::is_integral_v<MillisType>, int> = 0>
+//   static inline MillisType elapsed_milliseconds(type &since) {
+//     return to_milliseconds(elapsed(since));
+//   }
+
+//   static inline TickType_t elapsed_ticks(type &since) {
+//     return to_ticks(elapsed(since));
+//   }
+// };
+
+// struct TIM : Critical, Initer<const bool, const bool>
+// {
+//   TIM(
+//     const std::string &name, // Unique name to give timer
+//     const esp_timer_cb_t &cb, // Periodic callback
+//     // Optional parameters
+//     void *arg = nullptr, // Argument passed to callback
+//     const Microseconds::type timeout = default_timeout
+//   )
+//   : _timeout(timeout),
+//     _args(esp_timer_create_args_t{
+//       .callback = cb,
+//       .arg = arg,
+//       .dispatch_method = dispatch_method,
+//       .name = name.c_str(),
+//       .skip_unhandled_events = false,
+//     }),
+//     _handle(nullptr) {}
+
+//   virtual ~TIM() {
+//     if (_handle != nullptr) {
+//       ESP_ERROR_CHECK(
+//         esp_timer_delete(_handle)
+//       );
+//     }
+//   }
+
+//   virtual esp_err_t init(
+//     const bool begin = true, const bool one_shot = false
+//   ) override {
+//     {
+//       // auto token = lock();
+//       ESP_ERROR_CHECK(
+//         esp_timer_create(&_args, &_handle)
+//       );
+//     }
+//     if (begin) {
+//       return resume(one_shot);
+//     }
+//     return ESP_OK;
+//   }
+
+//   inline bool is_active() {
+//     // auto token = lock();
+//     return esp_timer_is_active(_handle);
+//   }
+
+//   inline esp_err_t resume(const bool one_shot = false) {
+//     if (is_active()) {
+//       return ESP_OK;
+//     }
+//     return start(_timeout, one_shot);
+//   }
+
+//   inline esp_err_t restart(
+//     const Microseconds::type timeout,
+//     const bool one_shot = false
+//   ) {
+//     if (is_active()) {
+//       //auto token = lock();
+//       //_timeout = timeout;
+//       //return esp_timer_restart(_handle, _timeout);
+//       stop();
+//     }
+//     return start(timeout, one_shot);
+//   }
+
+//   inline esp_err_t stop() {
+//     if (!is_active()) {
+//       return ESP_OK;
+//     }
+//     // auto token = lock();
+//     return esp_timer_stop(_handle);
+//   }
+
+// protected:
+//   inline esp_err_t start(
+//     const Microseconds::type timeout,
+//     const bool one_shot = false
+//   ) {
+//     if (is_active()) {
+//       return ESP_OK;
+//     }
+//     // auto token = lock();
+//     _timeout = timeout;
+//     if (one_shot) {
+//       return esp_timer_start_once(_handle, _timeout);
+//     }
+//     return esp_timer_start_periodic(_handle, _timeout);
+//   }
+
+// protected:
+//   static constexpr auto dispatch_method =
+// #ifdef CONFIG_ESP_TIMER_SUPPORTS_ISR_DISPATCH_METHOD
+//     ESP_TIMER_ISR
+// #else
+//     ESP_TIMER_TASK
+// #endif
+//   ;
+
+//   static constexpr auto default_timeout =
+//     Microseconds::from_ticks(LCD_TICK_RATE);
+
+//   Microseconds::type _timeout;
+//   esp_timer_create_args_t _args;
+//   esp_timer_handle_t _handle;
+// };
 
 struct PWM : Critical, Initer<> {
 public:
@@ -312,6 +441,7 @@ public:
       .timer_num = static_cast<ledc_timer_t>((chan >> 1) & 3),
       .freq_hz = freq_hz,
       .clk_cfg = cc,
+      .deconfigure = false,
     }),
     _active_low(actlow),
     _level(level) {}
@@ -373,7 +503,7 @@ public:
   // Set the backlight level as a ratio from 0.0 (off) to 1.0 (max brightness).
   esp_err_t set(const float ratio) {
     return set(static_cast<level_t>(
-      ratio * (max_ratio - min_ratio) + min_ratio + 0.5f // naive rounding
+      ratio * (max_ratio - min_ratio) + min_ratio + 0.5f // naïve rounding
     ));
   }
 
@@ -422,8 +552,13 @@ public:
       .sclk_io_num = sclk,
       .quadwp_io_num = -1,
       .quadhd_io_num = -1,
+      .data4_io_num = -1,
+      .data5_io_num = -1,
+      .data6_io_num = -1,
+      .data7_io_num = -1,
       .max_transfer_sz = static_cast<int>(txsize),
       .flags = 0, // SPICOMMON_BUSFLAG_MASTER|SPICOMMON_BUSFLAG_NATIVE_PINS,
+      .isr_cpu_id = core_affinity(esp_cpu_get_core_id()),
       .intr_flags = 0,
     }),
     _dma_channel(dmach) {}
@@ -463,7 +598,7 @@ public:
     const gpio_num_t sda, // SDA pin
     const gpio_num_t scl, // SCL pin
     // Optional parameters
-    const TickType_t timeout = LCD_I2C_TIMEOUT,
+    const TickType_t timeout = pdMS_TO_TICKS(LCD_I2C_TIMEOUT.count()),
     const i2c_mode_t mode = I2C_MODE_MASTER,
     const std::uint32_t clock = LCD_I2C_FREQ_HZ
   )
@@ -474,7 +609,8 @@ public:
       .scl_io_num = scl,
       .sda_pullup_en = GPIO_PULLUP_ENABLE,
       .scl_pullup_en = GPIO_PULLUP_ENABLE,
-      .master = { .clk_speed = clock }
+      .master = { .clk_speed = clock },
+      .clk_flags = I2C_SCLK_SRC_FLAG_FOR_NOMAL,
     }),
     _timeout(timeout) {}
 
@@ -516,7 +652,7 @@ public:
       i2c_master_write_read_device(
         _port, dev_addr, reg_addr_msb, 2, rx_buff, rx_size, _timeout
       ),
-      TAG, "failed to read from I²C device"
+      TAG, "failed to read register from I²C device"
     );
     return ESP_OK;
   }
@@ -536,7 +672,7 @@ public:
       i2c_master_write_to_device(
         _port, dev_addr, tx_buff, tx_size, _timeout
       ),
-      TAG, "failed to write to I²C device"
+      TAG, "failed to write register to I²C device"
     );
     return ESP_OK;
   }
@@ -615,14 +751,13 @@ protected:
     //
     // Instead, they are invoked by the ESP-IDF LCD component driver in response
     // to hardware events and high-level API calls.
-    static fastcode void on_tick(void *arg) {
-      instance->on_tick(arg);
-    }
-    static fastcode void on_task(void *arg) {
-      instance->on_task(arg);
-    }
-    static fastcode bool after_tx(ioctrl_t ioctrl, notify_t notify, void *context) {
-      return instance->after_tx(ioctrl, notify, context);
+    // static fastcode void on_timer(void *arg) {
+    //   instance->on_timer(arg);
+    // }
+    static fastcode void run(void *arg) {
+      ESP_ERROR_CHECK(
+        instance->run(arg)
+      );
     }
     static fastcode void on_tx_command(
       lv_display_t *disp, const std::uint8_t *cmd, std::size_t cmd_size,
@@ -639,6 +774,9 @@ protected:
       ESP_ERROR_CHECK_WITHOUT_ABORT(
         instance->on_tx_color(disp, cmd, cmd_size, param, param_size)
       );
+    }
+    static fastcode bool on_tx_color_flush(ioctrl_t ioctrl, notify_t notify, void *context) {
+      return instance->on_tx_color_flush(ioctrl, notify, context);
     }
     static fastcode void on_touch_read(
       lv_indev_t *indev, lv_indev_data_t *data
@@ -663,10 +801,7 @@ protected:
 
 public:
   LCD()
-  : _task(nullptr),
-    _tim(
-      nullptr
-    ),
+  : // _tim(nullptr),
     _spi(
       new SPI(
         LCD_SPI_HOST_ID,
@@ -698,15 +833,19 @@ public:
       .spi_mode = 0,
       .pclk_hz = LCD_SPI_FREQ_HZ,
       .trans_queue_depth = LCD_SPI_DMA_QSZ,
-      .on_color_trans_done = Callback<LCD>::after_tx,
+      .on_color_trans_done = Callback<LCD>::on_tx_color_flush,
       .user_ctx = this,
       .lcd_cmd_bits = 8,
       .lcd_param_bits = 8,
       .flags = {
-        .dc_as_cmd_phase = 0,
+        .dc_high_on_cmd = 0,
         .dc_low_on_data = 0,
+        .dc_low_on_param = 0,
         .octal_mode = 0,
-        .lsb_first = 0
+        .quad_mode = 0,
+        .sio_mode = 0,
+        .lsb_first = 0,
+        .cs_high_active = 0,
       }
     }),
     _driver(nullptr),
@@ -718,12 +857,9 @@ public:
   }
 
   virtual ~LCD() {
-    if (_task != nullptr) {
-      vTaskDelete(_task);
-    }
-    if (_tim != nullptr) {
-      delete _tim;
-    }
+    // if (_tim != nullptr) {
+    //   delete _tim;
+    // }
     if (_i2c != nullptr) {
       delete _i2c;
     }
@@ -759,25 +895,23 @@ public:
 
     lv_init();
 
-    // _tim = new TIM(
-    //   "LCD::on_tick",
-    //   Callback<LCD>::on_tick,
-    //   this
-    // );
+    // log_trace("creating LCD timer");
+
+    // _tim = new TIM("LCDTimer", Callback<LCD>::on_timer);
 
     // ESP_RETURN_ON_FALSE(
     //   _tim != nullptr, ESP_ERR_INVALID_STATE,
-    //   TAG, "invalid tick timer"
+    //   TAG, "failed to create LCD timer"
     // );
 
-    // log_trace("initializing tick timer");
+    // log_trace("initializing LCD timer");
 
     // ESP_RETURN_ON_ERROR(
-    //   _tim->init(true),
-    //   TAG, "failed to initialize tick timer"
+    //   _tim->init(true, false),
+    //   TAG, "failed to initialize LCD timer"
     // );
 
-    log_trace("installing tick callback");
+    log_trace("installing core tick hook");
 
     lv_tick_set_cb(millis);
 
@@ -843,12 +977,39 @@ public:
 
     log_trace("installing LCD framebuffers");
 
+    lv_display_set_color_format(_driver, LCD_COLOR_FMT);
     lv_display_set_buffers(
       _driver,
       _buffer[0],
       _buffer[1],
       spi_transfer_size,
       LV_DISPLAY_RENDER_MODE_PARTIAL
+    );
+
+    log_trace("initializing LCD root view");
+
+    ESP_RETURN_ON_ERROR(
+      view->init(lv_screen_active()),
+      TAG, "failed to initialize LCD root view"
+    );
+
+    log_trace("creating RTOS thread for LCD");
+
+    lv_memset(LVGLTask::stack, 0, FREERTOS_LVGL_TASK_STACK_SIZE);
+    _thread = xTaskCreateStaticPinnedToCore(
+      Callback<LCD>::run,
+      FREERTOS_LVGL_TASK_NAME,
+      FREERTOS_LVGL_TASK_STACK_SIZE,
+      view,
+      FREERTOS_LVGL_TASK_PRIORITY,
+      LVGLTask::stack,
+      &LVGLTask::task,
+      FREERTOS_LVGL_TASK_CORE_ID
+    );
+
+    ESP_RETURN_ON_FALSE(
+      nullptr != _thread, ESP_ERR_INVALID_STATE,
+      TAG, "failed to create RTOS thread for LCD"
     );
 
     log_trace("creating touch input driver");
@@ -865,27 +1026,6 @@ public:
     lv_indev_set_type(_finger, LV_INDEV_TYPE_POINTER);
     lv_indev_set_read_cb(_finger, Callback<LCD>::on_touch_read);
 
-    log_trace("initializing LCD root view");
-
-    ESP_RETURN_ON_ERROR(
-      view->init(lv_screen_active()),
-      TAG, "failed to initialize LCD root view"
-    );
-
-    log_trace("creating RTOS thread for LCD");
-
-    ESP_RETURN_ON_FALSE(
-      pdPASS == xTaskCreate(
-        Callback<LCD>::on_task,
-        FREERTOS_LVGL_TASK_NAME,
-        FREERTOS_LVGL_TASK_STACK_SIZE,
-        view,
-        FREERTOS_LVGL_TASK_PRIORITY,
-        &_task
-      ), ESP_ERR_INVALID_STATE,
-      TAG, "failed to create RTOS thread for LCD"
-    );
-
     log_trace("successfully initialized LCD, turning display on");
 
     set_backlight(0.75f);
@@ -893,49 +1033,64 @@ public:
     return ESP_OK;
   }
 
-  inline void on_tick(void *arg) {
-    auto elapsed = _tim->elapsed().count();
-    lv_tick_inc(elapsed);
-    // log_trace("tick: %u", now - last);
-  }
-  inline void on_task(void *arg) {
-    // xTaskDelayUntil arguments are expressed in units of system "ticks".
-    // Conventionally, 1 tick = 1 millisecond regardless of CPU frequency.
+  // Call refresh as frequently as possible to update the display. It will block
+  // until the next refresh cycle is due, and then it will update the display.
+  // While blocking, it allows other tasks and interrupts (e.g., idle task and
+  // touch input) to progress concurrently.
+  inline esp_err_t refresh(void *arg) {
+    static auto last = xTaskGetTickCount();
     View *view = static_cast<View *>(arg);
-    auto last = xTaskGetTickCount();
-    for (;;) {
   #ifndef TASK_SCHED_GREEDY
-      if /* conditionally run func() iff time has elapsed */
+    if /* conditionally run iff time has elapsed */
   #endif
-      (xTaskDelayUntil(&last, view->refresh_rate())) {
-        Critical::Section token = lock();
-        lv_timer_handler();
-        view->update(msecu32());
-      }
+    (xTaskDelayUntil(&last, view->refresh_rate())) {
+      log_trace("refreshing timer (lv_tick_get() = %lu)", lv_tick_get());
+      lv_timer_handler();
+      ESP_RETURN_ON_ERROR(
+        view->update(ticks()),
+        TAG, "failed to update view"
+      );
+    }
+    return ESP_OK;
+  }
+
+  // inline void on_timer(void *arg) {
+  //   static auto last = Microseconds::uptime();
+  //   lv_tick_inc(Microseconds::elapsed_milliseconds(last));
+  // }
+
+  inline esp_err_t run(void *arg) {
+  #if NUM_TASKS_TRACED
+    log_trace("waiting for sync_lvgl_task semaphore");
+    xSemaphoreTake(sync_lvgl_task, portMAX_DELAY);
+  #endif
+    for (;;) {
+      ESP_RETURN_ON_ERROR(
+        refresh(arg),
+        TAG, "failed to run LCD task"
+      );
     }
   }
-  inline bool after_tx(ioctrl_t ioctrl, notify_t notify, void *context) {
-    lv_display_flush_ready(_driver);
-    return false; // Whether a high-priority task was scheduled.
-  }
+
   inline esp_err_t on_tx_command(
     lv_display_t *disp, const std::uint8_t *cmd, std::size_t cmd_size,
     const std::uint8_t *param, std::size_t param_size
   ) {
     int tx_cmd = 0;
-    lv_memcpy(&tx_cmd, cmd, std::min(sizeof(int), cmd_size));
+    lv_memcpy(&tx_cmd, cmd, std::min(static_cast<std::size_t>(sizeof(int)), cmd_size));
     ESP_RETURN_ON_ERROR(
       esp_lcd_panel_io_tx_param(_ioctrl, tx_cmd, param, param_size),
       TAG, "failed to transmit command to LCD"
     );
     return ESP_OK;
   }
+
   inline esp_err_t on_tx_color(
     lv_display_t *disp, const std::uint8_t *cmd, std::size_t cmd_size,
     std::uint8_t *param, std::size_t param_size
   ) {
     int tx_cmd = 0;
-    lv_memcpy(&tx_cmd, cmd, std::min(sizeof(int), cmd_size));
+    lv_memcpy(&tx_cmd, cmd, std::min(static_cast<std::size_t>(sizeof(int)), cmd_size));
     lv_draw_sw_rgb565_swap(param, param_size);
     ESP_RETURN_ON_ERROR(
       esp_lcd_panel_io_tx_color(_ioctrl, tx_cmd, param, param_size),
@@ -944,8 +1099,13 @@ public:
     return ESP_OK;
   }
 
+  inline bool on_tx_color_flush(ioctrl_t ioctrl, notify_t notify, void *context) {
+    lv_display_flush_ready(_driver);
+    return false; // Whether a high-priority task was scheduled.
+  }
+
   inline void on_touch_read(lv_indev_t *indev, lv_indev_data_t *data) {
-    static Touch last = { .x = 0, .y = 0 };
+    static Touch last = { .track = 0, .x = 0, .y = 0, .area = 0, ._ = {0} };
     std::size_t count = count_touches();
     switch (count) {
       case 1: {
@@ -965,13 +1125,18 @@ public:
         break;
       }
     }
-    log_trace(
-      "[%d] %10s @ (%d, %d)",
-      count,
-      (data->state == LV_INDEV_STATE_PRESSED ? "pressed" : "released"),
-      data->point.x,
-      data->point.y
-    );
+    static auto prev = data->state;
+    auto curr = data->state;
+    if (prev != curr) {
+      log_trace(
+        "[%d] %10s @ (%d, %d)",
+        count,
+        (data->state == LV_INDEV_STATE_PRESSED ? "pressed" : "released"),
+        data->point.x,
+        data->point.y
+      );
+      prev = curr;
+    }
   }
 
 protected:
@@ -997,6 +1162,7 @@ protected:
     }
     return count;
   }
+
   inline esp_err_t map_touches(Touch *const pt, const std::size_t count) {
     static constexpr std::size_t max_size = sizeof(Touch) * i2c_touch_max;
     static std::uint8_t rx_buff[max_size];
@@ -1007,7 +1173,7 @@ protected:
 
     lv_memset(rx_buff, 0, max_size);
 
-    const std::size_t rx_size = std::min(max_size, sizeof(Touch) * count);
+    const std::size_t rx_size = std::min(max_size, static_cast<std::size_t>(sizeof(Touch)) * count);
     esp_err_t err = _i2c->reg_rx(
       LCD_I2C_DEV_ADD, i2c_reg_base_point, rx_buff, rx_size
     );
@@ -1060,18 +1226,21 @@ public:
   inline esp_err_t set_backlight(const PWM::level_t level) {
     return _backlight->set(level);
   }
+
   // Set the backlight level as a ratio in the range [0.0=OFF, 1.0=MAX].
   inline esp_err_t set_backlight(const float ratio) {
     return _backlight->set(ratio);
   }
+
   inline lv_display_t *display() { return _driver; }
 
 protected:
-  Thread _task;
-  TIM *_tim;
+  // TIM *_tim;
   SPI *_spi;
   I2C *_i2c;
   PWM *_backlight;
+
+  TaskHandle_t _thread;
 
   ioctrl_t _ioctrl;
   ioconf_t _ioconf;

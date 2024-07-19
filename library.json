@@ -25,7 +25,6 @@
     "espressif32"
   ],
   "dependencies": {
-    "ardnew/cronos": "^0.2",
     "lvgl/lvgl": "symlink:///opt/lvgl/src"
   },
   "headers": [

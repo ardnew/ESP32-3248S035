@@ -17,8 +17,8 @@ The LCD graphics and touch support are provided directly by [lvgl](https://githu
 [Example projects](examples) exist for PlatformIO. It uses the `arduino` framework and `espressif32` platform, so it should be trivial to use in either of those environments.
 
 ## Layout
-
-The following image is sourced from [macsbug](https://macsbug.wordpress.com/2022/10/02/esp32-3248s035/). Note this image is taken of the board variant with resistive touch (XPT2046) instead of capacitive touch (GT911). 
+`` cq
+The following image is sourced from [macsbug](https://macsbug.wordpress.com/2022/10/02/esp32-3248s035/). Note this image is taken of the board variant with resistive touch (XPT2046) instead of capacitive touch (GT911).
 
 ![ESP32-3248S035R](docs/pcb-layout.jpg)
 
@@ -30,7 +30,7 @@ Some of the notable differences I've observed between resistive and capacitive t
 | `U4` |          4MB SPI flash          |     Unpopulated      |
 |`CN1.3` |    Not connected (`NC`)       |        IO22          |
 
-## Pinout 
+## Pinout
 
 ![ESP-WROOM-32](docs/soc-pinout.png)
 

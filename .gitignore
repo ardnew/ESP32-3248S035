@@ -1,10 +1,14 @@
-examples/*/*
-!examples/arduino/**/*.{c,cpp,h,hpp}
-!examples/arduino/**/Makefile
-!examples/platformio/**
+.vscode/
+*.code-workspace
 
-**/.vscode/
-**/*.code-workspace
+build/
+*.o
+*.bak
+*.bup
+*.backup
+*.[ch]pp.*
 
-**/*.o
-**/*.{bak,bup,backup}
+*coredump*
+
+CMakeLists.txt
+
