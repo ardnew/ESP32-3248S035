@@ -1,5 +1,7 @@
 #include "main.hpp"
 
+//#define use_static_lcd_task
+
 #ifndef FREERTOS_LVGL_TASK_NAME
 #undef use_static_lcd_task
 #endif // FREERTOS_LVGL_TASK_NAME
@@ -11,7 +13,9 @@
 bsp::LCD *lcd = new bsp::LCD();
 Main *view = new Main(lcd);
 
-//fastcode void vApplicationTickHook(void) { lv_tick_inc(1); }
+fastcode void vApplicationTickHook(void) { lv_tick_inc(pdTICKS_TO_MS(1)); }
+
+//esp_register_freertos_tick_hook_for_cpu(esp_freertos_tick_cb_tnew_tick_cb, UBaseType_t cpuid)
 
 void run()
 {

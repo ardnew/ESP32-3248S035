@@ -26,71 +26,6 @@
 SemaphoreHandle_t sync_lvgl_task;
 SemaphoreHandle_t sync_stats_task;
 
-// void vTaskGetRunTimeStats(char *pcWriteBuffer)
-// {
-//     TaskStatus_t *pxTaskStatusArray;
-//     volatile UBaseType_t uxArraySize, x;
-//     unsigned long ulTotalRunTime, ulStatsAsPercentage;
-
-//     /* Make sure the write buffer does not contain a string. */
-//     *pcWriteBuffer = 0x00;
-
-//     /* Take a snapshot of the number of tasks in case it changes while this
-//     function is executing. */
-//     uxArraySize = uxTaskGetNumberOfTasks();
-
-//     /* Allocate a TaskStatus_t structure for each task.  An array could be
-//     allocated statically at compile time. */
-//     pxTaskStatusArray = pvPortMalloc(uxArraySize * sizeof(TaskStatus_t));
-
-//     if (pxTaskStatusArray != NULL)
-//     {
-//         /* Generate raw status information about each task. */
-//         uxArraySize = uxTaskGetSystemState(pxTaskStatusArray,
-//                                            uxArraySize,
-//                                            &ulTotalRunTime);
-
-//         /* For percentage calculations. */
-//         ulTotalRunTime /= 100UL;
-
-//         /* Avoid divide by zero errors. */
-//         if (ulTotalRunTime > 0)
-//         {
-//             /* For each populated position in the pxTaskStatusArray array,
-//             format the raw data as human readable ASCII data. */
-//             for (x = 0; x < uxArraySize; x++)
-//             {
-//                 /* What percentage of the total run time has the task used?
-//                 This will always be rounded down to the nearest integer.
-//                 ulTotalRunTimeDiv100 has already been divided by 100. */
-//                 ulStatsAsPercentage =
-//                     pxTaskStatusArray[x].ulRunTimeCounter / ulTotalRunTime;
-
-//                 if (ulStatsAsPercentage > 0UL)
-//                 {
-//                     sprintf(pcWriteBuffer, "%stt%lutt%lu%%rn",
-//                             pxTaskStatusArray[x].pcTaskName,
-//                             pxTaskStatusArray[x].ulRunTimeCounter,
-//                             ulStatsAsPercentage);
-//                 }
-//                 else
-//                 {
-//                     /* If the percentage is zero here then the task has
-//                     consumed less than 1% of the total run time. */
-//                     sprintf(pcWriteBuffer, "%stt%lutt<1%%rn",
-//                             pxTaskStatusArray[x].pcTaskName,
-//                             pxTaskStatusArray[x].ulRunTimeCounter);
-//                 }
-
-//                 pcWriteBuffer += strlen((char *)pcWriteBuffer);
-//             }
-//         }
-
-//         /* The array is no longer needed, free the memory it consumes. */
-//         vPortFree(pxTaskStatusArray);
-//     }
-// }
-
 static const char *task_state_str(eTaskState state)
 {
   switch (state)
@@ -291,23 +226,3 @@ void stats_task(void *arg)
 }
 
 #endif // NUM_TASKS_TRACED
-
-// void app_main(void)
-// {
-//     //Allow other core to finish initialization
-//     vTaskDelay(pdMS_TO_TICKS(100));
-
-//     //Create semaphores to synchronize
-//     sync_lvgl_task = xSemaphoreCreateCounting(NUM_TASKS_TRACED, 0);
-//     sync_stats_task = xSemaphoreCreateBinary();
-
-//     //Create spin tasks
-//     for (int i = 0; i < NUM_TASKS_TRACED; i++) {
-//         snprintf(task_names[i], configMAX_TASK_NAME_LEN, "spin%d", i);
-//         xTaskCreatePinnedToCore(spin_task, task_names[i], 1024, NULL, SPIN_TASK_PRIO, NULL, tskNO_AFFINITY);
-//     }
-
-//     //Create and start stats task
-//     xTaskCreatePinnedToCore(stats_task, "stats", 4096, NULL, STATS_TASK_PRIO, NULL, tskNO_AFFINITY);
-//     xSemaphoreGive(sync_stats_task);
-// }

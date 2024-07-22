@@ -80,19 +80,26 @@ using namespace std::literals::chrono_literals;
 
 // =============================================================================
 //
-#pragma region "Board-support package API"
+#pragma region "External declarations"
 
 #if NUM_TASKS_TRACED
-
-extern "C" {
+extern "C"
+{
   extern SemaphoreHandle_t sync_lvgl_task;
   extern SemaphoreHandle_t sync_stats_task;
   extern void stats_task(void *arg);
 }
-
 #endif
 
-namespace bsp {
+#pragma endregion "External declarations"
+//
+// =============================================================================
+
+// =============================================================================
+//
+#pragma region "Board-support package API"
+namespace bsp
+{
 
 // -----------------------------------------------------------------------------
 #pragma region "Type traits"
@@ -116,7 +123,8 @@ namespace bsp {
 // TAG is required by the ESP-IDF logging system.
 static inline constexpr char TAG[] = "ESP32-3248S035";
 
-struct LVGLTask {
+struct LVGLTask
+{
   static constexpr std::size_t size = FREERTOS_LVGL_TASK_STACK_SIZE;
   static inline StackType_t stack[size] = { 0 };
   static inline StaticTask_t task {};
@@ -159,7 +167,8 @@ struct LVGLTask {
 //
 // It is intended to be used as a base class for singleton classes that need to
 // protect access to the hardware peripherals they represent.
-struct Critical : std::mutex {
+struct Critical : std::mutex
+{
   using Section = const std::lock_guard<Critical::mutex>;
 
   // By using lock() from a derived context — which uses *this as the mutex —
@@ -177,20 +186,24 @@ struct Critical : std::mutex {
 };
 
 template <typename ...T>
-struct Initer {
+struct Initer
+{
   virtual esp_err_t init(T... t) = 0;
 };
 
-struct Updater {
+struct Updater
+{
   virtual esp_err_t update(TickType_t const) = 0;
 };
 
 template <typename ...T>
-struct Controller : Critical, Initer<T...>, Updater {
+struct Controller : Critical, Initer<T...>, Updater
+{
   virtual TickType_t refresh_rate() const noexcept = 0;
 };
 
-struct View : Controller<lv_obj_t *> {
+struct View : Controller<lv_obj_t *>
+{
   virtual std::string title() = 0;
 };
 
@@ -225,13 +238,23 @@ template <typename ...U> inline void log_write(U... u)
 template <typename ...U> inline void log_error(U... u)
   { fprintf(stderr, u...); }
 
-// Return the number of milliseconds since boot.
+// Return milliseconds elapsed since boot (per internal RTC).
 static inline std::uint32_t millis() { return esp_timer_get_time() / 1000; }
+// Return RTOS tick count since boot (per millis() above).
 static inline TickType_t ticks() { return pdMS_TO_TICKS(millis()); }
 
-// Convert a CPU core ID to affinity.
+// Convert a CPU core ID (N) to affinity (N+1).
 static inline esp_intr_cpu_affinity_t core_affinity(const BaseType_t core_id)
-  { return static_cast<esp_intr_cpu_affinity_t>(core_id + 1); }
+{
+  const int affinity = std::min(configNUMBER_OF_CORES, core_id + 1);
+  return static_cast<esp_intr_cpu_affinity_t>(affinity);
+}
+// Convert affinity (N+1) to a CPU core ID (N).
+static inline BaseType_t core_id(const esp_intr_cpu_affinity_t affinity)
+{
+  const int core_id = std::max(0, affinity - 1);
+  return static_cast<BaseType_t>(core_id);
+}
 
 #pragma endregion "Utility functions"
 // -----------------------------------------------------------------------------
@@ -401,14 +424,17 @@ static inline esp_intr_cpu_affinity_t core_affinity(const BaseType_t core_id)
 //   esp_timer_handle_t _handle;
 // };
 
-struct PWM : Critical, Initer<> {
+struct PWM : Critical, Initer<>
+{
 public:
   using level_t = std::uint8_t;
-  static constexpr level_t min_level = std::numeric_limits<level_t>::min();
-  static constexpr level_t max_level = std::numeric_limits<level_t>::max();
-  static constexpr float min_ratio = static_cast<float>(min_level);
-  static constexpr float max_ratio = static_cast<float>(max_level);
-  static constexpr level_t default_level = 0x0;
+  static constexpr level_t level_min = std::numeric_limits<level_t>::min();
+  static constexpr level_t level_max = std::numeric_limits<level_t>::max();
+  static constexpr level_t level_default = 0x0;
+  static constexpr float ratio_min = static_cast<float>(level_min);
+  static constexpr float ratio_max = static_cast<float>(level_max);
+  static constexpr float ratio_domain = ratio_max - ratio_min;
+  const std::uint32_t max_duty;
 
 public:
   PWM(
@@ -417,7 +443,7 @@ public:
     const ledc_timer_bit_t bits, // PWM resolution
     const std::uint32_t freq_hz, // PWM frequency
     // Optional parameters
-    const level_t level = default_level,
+    const level_t level = level_default,
     const std::uint32_t duty = 0,
     const int hpoint = 0,
     const bool invert = false,
@@ -425,7 +451,8 @@ public:
     const ledc_intr_type_t intr = LEDC_INTR_DISABLE,
     const ledc_clk_cfg_t cc = LEDC_AUTO_CLK
   )
-  : _channel(ledc_channel_config_t{
+  : max_duty((1 << bits) - 1),
+    _channel(ledc_channel_config_t{
       .gpio_num = pin,
       .speed_mode = static_cast<ledc_mode_t>(chan >> 3),
       .channel = static_cast<ledc_channel_t>(chan & 7),
@@ -444,9 +471,11 @@ public:
       .deconfigure = false,
     }),
     _active_low(actlow),
-    _level(level) {}
+    _level(level)
+  {}
 
-  virtual ~PWM() {
+  virtual ~PWM()
+  {
     ESP_ERROR_CHECK_WITHOUT_ABORT(
       ledc_stop(_channel.speed_mode, _channel.channel, 0)
     );
@@ -457,7 +486,9 @@ public:
     );
   }
 
-  virtual esp_err_t init() override {
+public:
+  virtual esp_err_t init() override
+  {
     ESP_RETURN_ON_ERROR(
       ledc_timer_config(&_timer),
       TAG, "failed to configure PWM timer"
@@ -479,15 +510,15 @@ public:
     return set(_level);
   }
 
-public:
-  std::uint32_t duty(const level_t level) const noexcept {
+  std::uint32_t duty(const level_t level) const noexcept
+  {
     // Scale level to resolution, e.g.:
     //   8-bit=[0,255] → 10-bit=[0,1023] <==> (level * 1023) / 255
-    return (static_cast<std::uint32_t>(level) * ((1 << _timer.duty_resolution) - 1)) /
-      ((1 << std::numeric_limits<level_t>::digits) - 1);
+    return static_cast<std::uint32_t>(level) * max_duty / level_max;
   }
 
-  esp_err_t set(const level_t level) {
+  esp_err_t set(const level_t level)
+  {
     ESP_RETURN_ON_ERROR(
       ledc_set_duty(_channel.speed_mode, _channel.channel, duty(level)),
       TAG, "failed to set PWM duty"
@@ -501,10 +532,10 @@ public:
   }
 
   // Set the backlight level as a ratio from 0.0 (off) to 1.0 (max brightness).
-  esp_err_t set(const float ratio) {
-    return set(static_cast<level_t>(
-      ratio * (max_ratio - min_ratio) + min_ratio + 0.5f // naïve rounding
-    ));
+  esp_err_t set(const float ratio)
+  {
+    // Scale [0.0F, 1.0F] over [0U, 255U] with naïve rounding.
+    return set(static_cast<level_t>(ratio * ratio_domain + ratio_min + 0.5f));
   }
 
   // esp_err_t fade(const int level) {
@@ -534,7 +565,8 @@ protected:
   level_t _level;
 };
 
-struct SPI : Critical, Initer<> {
+struct SPI : Critical, Initer<>
+{
 public:
   SPI(
     const spi_host_device_t host, // SPI host device
@@ -561,9 +593,11 @@ public:
       .isr_cpu_id = core_affinity(esp_cpu_get_core_id()),
       .intr_flags = 0,
     }),
-    _dma_channel(dmach) {}
+    _dma_channel(dmach)
+  {}
 
-  virtual ~SPI() {
+  virtual ~SPI()
+  {
     Critical::Section token = lock();
     if (spi_bus_get_attr(_host) != nullptr) {
       ESP_ERROR_CHECK_WITHOUT_ABORT(
@@ -572,7 +606,9 @@ public:
     }
   }
 
-  virtual esp_err_t init() override {
+public:
+  virtual esp_err_t init() override
+  {
     Critical::Section token = lock();
     ESP_RETURN_ON_ERROR(
       spi_bus_initialize(_host, &_config, _dma_channel),
@@ -581,7 +617,6 @@ public:
     return ESP_OK;
   }
 
-public:
   spi_host_device_t host() const noexcept { return _host; }
   spi_bus_config_t config() const noexcept { return _config; }
 
@@ -591,7 +626,8 @@ protected:
   const spi_common_dma_t _dma_channel;
 };
 
-struct I2C : Critical, Initer<> {
+struct I2C : Critical, Initer<>
+{
 public:
   I2C(
     const i2c_port_t port, // I²C port
@@ -612,16 +648,20 @@ public:
       .master = { .clk_speed = clock },
       .clk_flags = I2C_SCLK_SRC_FLAG_FOR_NOMAL,
     }),
-    _timeout(timeout) {}
+    _timeout(timeout)
+  {}
 
-  virtual ~I2C() {
+  virtual ~I2C()
+  {
     Critical::Section token = lock();
     ESP_ERROR_CHECK_WITHOUT_ABORT(
       i2c_driver_delete(_port)
     );
   }
 
-  virtual esp_err_t init() override {
+public:
+  virtual esp_err_t init() override
+  {
     Critical::Section token = lock();
     ESP_RETURN_ON_ERROR(
       i2c_param_config(_port, &_config),
@@ -634,7 +674,6 @@ public:
     return ESP_OK;
   }
 
-public:
   i2c_port_t port() const noexcept { return _port; }
   i2c_config_t config() const noexcept { return _config; }
 
@@ -643,7 +682,8 @@ public:
     const std::uint16_t reg_addr,
     std::uint8_t *rx_buff,
     const std::size_t rx_size
-  ) {
+  )
+  {
     std::uint8_t reg_addr_msb[2] = {
       byte_at<1>(reg_addr),
       byte_at<0>(reg_addr)
@@ -661,8 +701,9 @@ public:
   esp_err_t reg_tx(
     const std::uint8_t dev_addr,
     const std::uint16_t reg_addr
-  ) {
-    const std::size_t tx_size = sizeof...(Tx) + 2;
+  )
+  {
+    const std::size_t tx_size = sizeof...(Tx) + 2; // +16-bit register address
     const std::uint8_t tx_buff[tx_size] = {
       byte_at<1>(reg_addr),
       byte_at<0>(reg_addr),
@@ -691,28 +732,11 @@ protected:
 // touch screen saddled onto an ESP32 workhorse.
 //
 // This class drives both display (ST7796S) and touch controller (GT911).
-struct LCD : Critical, Initer<View *> {
+struct LCD : Critical, Initer<View *>
+{
 public:
-  // The maximum size (bytes) of an SPI transaction (Rx/Tx).
-  static constexpr std::size_t spi_transfer_size = (LV_COLOR_DEPTH >> 3) *
-    LCD_PHY_RES_X * LCD_PHY_RES_Y / LCD_SPI_TX_NDIV;
-
-  // Parameters for the GT911 touch controller.
-  static constexpr std::uint16_t i2c_reg_prod_id = 0x8140;
-  static constexpr std::size_t i2c_size_prod_id = 4U;
-  static constexpr std::uint16_t i2c_reg_stat = 0x814E; // buffer/track status
-  static constexpr std::uint16_t i2c_reg_base_point = 0x814F;
-  static constexpr std::size_t i2c_touch_max = 5U; // simultaneous touch points
-
-protected:
-  using ioctrl_t = esp_lcd_panel_io_handle_t;
-  using ioconf_t = esp_lcd_panel_io_spi_config_t;
-  using notify_t = esp_lcd_panel_io_event_data_t *;
-  using driver_t = lv_display_t *;
-  using finger_t = lv_indev_t *;
-  using buffer_t = lv_color_t *;
-
-  struct __attribute__((packed)) Touch {
+  struct __attribute__((packed)) Touch
+  {
     // attributes of an individual touch event, this structure is repeated
     // contiguously in the following memory-mapped registers, which implements
     // 5-point multi-touch tracking (in the hardware).
@@ -731,74 +755,6 @@ protected:
     std::uint8_t _[1]; // Value is irrelevant
   };
 
-  // Static function wrappers for LCD instance methods.
-  // These can be used as callback functions for the various C APIs.
-  // Be sure to initialize the *instance member! :)
-  template <typename T = LCD>
-  struct Callback {
-  public:
-    static esp_err_t init(T *target) {
-      if (target != nullptr) {
-        Critical::Section token = target->lock();
-        instance = const_cast<T *>(target);
-        return ESP_OK;
-      }
-      return ESP_ERR_INVALID_ARG;
-    }
-
-  protected:
-    // The following static callback functions should not be called directly.
-    //
-    // Instead, they are invoked by the ESP-IDF LCD component driver in response
-    // to hardware events and high-level API calls.
-    // static fastcode void on_timer(void *arg) {
-    //   instance->on_timer(arg);
-    // }
-    static fastcode void run(void *arg) {
-      ESP_ERROR_CHECK(
-        instance->run(arg)
-      );
-    }
-    static fastcode void on_tx_command(
-      lv_display_t *disp, const std::uint8_t *cmd, std::size_t cmd_size,
-      const std::uint8_t *param, std::size_t param_size
-    ) {
-      ESP_ERROR_CHECK_WITHOUT_ABORT(
-        instance->on_tx_command(disp, cmd, cmd_size, param, param_size)
-      );
-    }
-    static fastcode void on_tx_color(
-      lv_display_t *disp, const std::uint8_t *cmd, std::size_t cmd_size,
-      std::uint8_t *param, std::size_t param_size
-    ) {
-      ESP_ERROR_CHECK_WITHOUT_ABORT(
-        instance->on_tx_color(disp, cmd, cmd_size, param, param_size)
-      );
-    }
-    static fastcode bool on_tx_color_flush(ioctrl_t ioctrl, notify_t notify, void *context) {
-      return instance->on_tx_color_flush(ioctrl, notify, context);
-    }
-    static fastcode void on_touch_read(
-      lv_indev_t *indev, lv_indev_data_t *data
-    ) {
-      instance->on_touch_read(indev, data);
-    }
-
-  protected:
-    // Because the *instance member is such a critical requirement when using
-    // this Callback wrapper class — the BSP cannot function without it — the
-    // static functions always assume it is non-null. Otherwise, the application
-    // will very appropriately crash.
-    //
-    // A good way to guarantee the above is to call the static Callback::init()
-    // function anywhere in the LCD constructor. It is guaranteed because all of
-    // of the callbacks are installed in the LCD::init() instance method.
-    static inline T *instance = nullptr;
-
-    // Expose the static functions _only_ to the callbacks' target class.
-    friend T;
-  };
-
 public:
   LCD()
   : // _tim(nullptr),
@@ -808,7 +764,7 @@ public:
         static_cast<gpio_num_t>(LCD_SPI_PIN_SDI),
         static_cast<gpio_num_t>(LCD_SPI_PIN_SDO),
         static_cast<gpio_num_t>(LCD_SPI_PIN_SCK),
-        spi_transfer_size
+        _spi_transfer_size
       )
     ),
     _i2c(
@@ -850,13 +806,15 @@ public:
     }),
     _driver(nullptr),
     _finger(nullptr),
-    _buffer{nullptr, nullptr} {
+    _buffer{nullptr, nullptr}
+  {
     ESP_ERROR_CHECK(
       (Callback<LCD>::init(this))
     );
   }
 
-  virtual ~LCD() {
+  virtual ~LCD()
+  {
     // if (_tim != nullptr) {
     //   delete _tim;
     // }
@@ -889,9 +847,13 @@ public:
     }
   }
 
-  virtual esp_err_t init(View *view) override {
+public:
+  inline lv_display_t *display() { return _driver; }
+  inline lv_indev_t *input() { return _finger; }
 
-    log_trace("initializing LCD sou^H^Hubsystem");
+  virtual esp_err_t init(View *view) override
+  {
+    log_trace("initializing LCD sound^H^H^H^Hubsystem");
 
     lv_init();
 
@@ -913,7 +875,7 @@ public:
 
     log_trace("installing core tick hook");
 
-    lv_tick_set_cb(millis);
+    // lv_tick_set_cb(millis);
 
     ESP_RETURN_ON_FALSE(
       _backlight != nullptr, ESP_ERR_INVALID_STATE,
@@ -967,7 +929,7 @@ public:
 
     for (int i = 0; i < 2; i++) {
       _buffer[i] = static_cast<lv_color_t *>(
-        heap_caps_malloc(spi_transfer_size, LCD_SPI_DMA_CAP)
+        heap_caps_malloc(_spi_transfer_size, LCD_SPI_DMA_CAP)
       );
       ESP_RETURN_ON_FALSE(
         _buffer[i] != nullptr, ESP_ERR_NO_MEM,
@@ -982,30 +944,23 @@ public:
       _driver,
       _buffer[0],
       _buffer[1],
-      spi_transfer_size,
+      _spi_transfer_size,
       LV_DISPLAY_RENDER_MODE_PARTIAL
-    );
-
-    log_trace("initializing LCD root view");
-
-    ESP_RETURN_ON_ERROR(
-      view->init(lv_screen_active()),
-      TAG, "failed to initialize LCD root view"
     );
 
     log_trace("creating RTOS thread for LCD");
 
-    lv_memset(LVGLTask::stack, 0, FREERTOS_LVGL_TASK_STACK_SIZE);
-    _thread = xTaskCreateStaticPinnedToCore(
-      Callback<LCD>::run,
-      FREERTOS_LVGL_TASK_NAME,
-      FREERTOS_LVGL_TASK_STACK_SIZE,
-      view,
-      FREERTOS_LVGL_TASK_PRIORITY,
-      LVGLTask::stack,
-      &LVGLTask::task,
-      FREERTOS_LVGL_TASK_CORE_ID
-    );
+    // lv_memset(LVGLTask::stack, 0, FREERTOS_LVGL_TASK_STACK_SIZE);
+    // _thread = xTaskCreateStaticPinnedToCore(
+    //   Callback<LCD>::run,
+    //   FREERTOS_LVGL_TASK_NAME,
+    //   FREERTOS_LVGL_TASK_STACK_SIZE,
+    //   view,
+    //   FREERTOS_LVGL_TASK_PRIORITY,
+    //   LVGLTask::stack,
+    //   &LVGLTask::task,
+    //   FREERTOS_LVGL_TASK_CORE_ID
+    // );
 
     ESP_RETURN_ON_FALSE(
       nullptr != _thread, ESP_ERR_INVALID_STATE,
@@ -1026,6 +981,13 @@ public:
     lv_indev_set_type(_finger, LV_INDEV_TYPE_POINTER);
     lv_indev_set_read_cb(_finger, Callback<LCD>::on_touch_read);
 
+    log_trace("initializing LCD root view");
+
+    ESP_RETURN_ON_ERROR(
+      view->init(lv_screen_active()),
+      TAG, "failed to initialize LCD root view"
+    );
+
     log_trace("successfully initialized LCD, turning display on");
 
     set_backlight(0.75f);
@@ -1038,14 +1000,15 @@ public:
   // While blocking, it allows other tasks and interrupts (e.g., idle task and
   // touch input) to progress concurrently.
   inline esp_err_t refresh(void *arg) {
-    static auto last = xTaskGetTickCount();
+    // static auto last = xTaskGetTickCount();
     View *view = static_cast<View *>(arg);
+    vTaskDelay(lv_timer_handler());
   #ifndef TASK_SCHED_GREEDY
     if /* conditionally run iff time has elapsed */
   #endif
-    (xTaskDelayUntil(&last, view->refresh_rate())) {
+      (true) {
+//    (xTaskDelayUntil(&last, view->refresh_rate())) {
       log_trace("refreshing timer (lv_tick_get() = %lu)", lv_tick_get());
-      lv_timer_handler();
       ESP_RETURN_ON_ERROR(
         view->update(ticks()),
         TAG, "failed to update view"
@@ -1072,6 +1035,186 @@ public:
     }
   }
 
+  // Set the backlight level in the range [0=OFF, 255=MAX].
+  inline esp_err_t set_backlight(const PWM::level_t level) {
+    return _backlight->set(level);
+  }
+
+  // Set the backlight level as a ratio in the range [0.0=OFF, 1.0=MAX].
+  inline esp_err_t set_backlight(const float ratio) {
+    return _backlight->set(ratio);
+  }
+
+  inline std::size_t count_touches() {
+    static std::uint8_t stat = 0;
+    std::size_t count = 0;
+
+    // log_trace("reading touch status");
+
+    ESP_ERROR_CHECK_WITHOUT_ABORT(
+      _i2c->reg_rx(LCD_I2C_DEV_ADD, _i2c_reg_stat, &stat, sizeof(stat))
+    );
+    // log_trace("raw touch stat: %d", stat);
+
+    count = static_cast<std::size_t>(stat) & 0xFFul;
+    stat = 0;
+
+    if (((count & 0x80ul) > 0) && ((count & 0x0Ful) < _i2c_touch_max)) {
+      ESP_ERROR_CHECK_WITHOUT_ABORT(
+        _i2c->reg_tx<0>(LCD_I2C_DEV_ADD, _i2c_reg_stat)
+      );
+      count &= 0x0Ful;
+    }
+    return count;
+  }
+
+  inline esp_err_t map_touches(Touch *const pt, const std::size_t count) {
+    static constexpr std::size_t max_size = sizeof(Touch) * _i2c_touch_max;
+    static std::uint8_t rx_buff[max_size];
+
+    lv_display_rotation_t rotation = lv_display_get_rotation(_driver);
+    std::int32_t width_px = lv_display_get_horizontal_resolution(_driver);
+    std::int32_t height_px = lv_display_get_vertical_resolution(_driver);
+
+    lv_memset(rx_buff, 0, max_size);
+
+    const std::size_t rx_size = std::min(
+      max_size, static_cast<std::size_t>(sizeof(Touch)) * count
+    );
+    esp_err_t err = _i2c->reg_rx(
+      LCD_I2C_DEV_ADD, _i2c_reg_base_point, rx_buff, rx_size
+    );
+    lv_memcpy(pt, rx_buff, rx_size);
+
+    // log_trace("raw touch data: x=%d y=%d", pt->x, pt->y);
+
+    switch (rotation) {
+      case LV_DISPLAY_ROTATION_0: {
+        for (std::uint8_t i = 0; i < count; ++i) {
+          pt[i].x = width_px - pt[i].x;
+          pt[i].y = height_px - pt[i].y;
+        }
+        break;
+      }
+      case LV_DISPLAY_ROTATION_90: {
+        std::uint16_t swap;
+        for (std::uint8_t i = 0; i < count; ++i) {
+          swap = pt[i].x;
+          pt[i].x = pt[i].y;
+          pt[i].y = height_px - swap;
+        }
+        break;
+      }
+      case LV_DISPLAY_ROTATION_180: {
+        for (std::uint8_t i = 0; i < count; ++i) {
+          pt[i].x = pt[i].x;
+          pt[i].y = pt[i].y;
+        }
+        break;
+      }
+      case LV_DISPLAY_ROTATION_270: {
+        std::uint16_t swap;
+        for (std::uint8_t i = 0; i < count; ++i) {
+          swap = pt[i].x;
+          pt[i].x = width_px - pt[i].y;
+          pt[i].y = swap;
+        }
+        break;
+      }
+    }
+
+    // log_trace("mapped touch data: x=%d y=%d", pt->x, pt->y);
+
+    return err;
+  }
+
+protected:
+  using ioctrl_t = esp_lcd_panel_io_handle_t;
+  using ioconf_t = esp_lcd_panel_io_spi_config_t;
+  using notify_t = esp_lcd_panel_io_event_data_t *;
+  using driver_t = lv_display_t *;
+  using finger_t = lv_indev_t *;
+  using buffer_t = lv_color_t *;
+
+protected:
+  // Static function wrappers for LCD instance methods.
+  // These can be used as callback functions for the various C APIs.
+  // Be sure to initialize the *instance member! :)
+  template <typename T = LCD>
+  struct Callback
+  {
+  public:
+    static esp_err_t init(T *target)
+    {
+      if (target != nullptr) {
+        Critical::Section token = target->lock();
+        instance = const_cast<T *>(target);
+        return ESP_OK;
+      }
+      return ESP_ERR_INVALID_ARG;
+    }
+
+  protected:
+    // The following static callback functions should not be called directly.
+    //
+    // Instead, they are invoked by the ESP-IDF LCD component driver in response
+    // to hardware events and high-level API calls.
+    // static fastcode void on_timer(void *arg)
+    // {
+    //   instance->on_timer(arg);
+    // }
+    static fastcode void run(void *arg)
+    {
+      ESP_ERROR_CHECK(
+        instance->run(arg)
+      );
+    }
+    static fastcode void on_tx_command(
+      lv_display_t *disp, const std::uint8_t *cmd, std::size_t cmd_size,
+      const std::uint8_t *param, std::size_t param_size
+    )
+    {
+      ESP_ERROR_CHECK_WITHOUT_ABORT(
+        instance->on_tx_command(disp, cmd, cmd_size, param, param_size)
+      );
+    }
+    static fastcode void on_tx_color(
+      lv_display_t *disp, const std::uint8_t *cmd, std::size_t cmd_size,
+      std::uint8_t *param, std::size_t param_size
+    )
+    {
+      ESP_ERROR_CHECK_WITHOUT_ABORT(
+        instance->on_tx_color(disp, cmd, cmd_size, param, param_size)
+      );
+    }
+    static fastcode bool on_tx_color_flush(
+      ioctrl_t ioctrl, notify_t notify, void *context)
+    {
+      return instance->on_tx_color_flush(ioctrl, notify, context);
+    }
+    static fastcode void on_touch_read(
+      lv_indev_t *indev, lv_indev_data_t *data
+    )
+    {
+      instance->on_touch_read(indev, data);
+    }
+
+  protected:
+    // Because the *instance member is such a critical requirement when using
+    // this Callback wrapper class — the BSP cannot function without it — the
+    // static functions always assume it is non-null. Otherwise, the application
+    // will very appropriately crash.
+    //
+    // A good way to guarantee the above is to call the static Callback::init()
+    // function anywhere in the LCD constructor. It is guaranteed because all of
+    // of the callbacks are installed in the LCD::init() instance method.
+    static inline T *instance = nullptr;
+
+    // Expose the static functions _only_ to the callbacks' target class.
+    friend T;
+  };
+
+protected:
   inline esp_err_t on_tx_command(
     lv_display_t *disp, const std::uint8_t *cmd, std::size_t cmd_size,
     const std::uint8_t *param, std::size_t param_size
@@ -1140,99 +1283,16 @@ public:
   }
 
 protected:
-  inline std::size_t count_touches() {
-    static std::uint8_t stat = 0;
-    std::size_t count = 0;
+  // The maximum size (bytes) of an SPI transaction (Rx/Tx).
+  static constexpr std::size_t _spi_transfer_size =
+    (LV_COLOR_DEPTH >> 3) * LCD_PHY_RES_X * LCD_PHY_RES_Y / LCD_SPI_TX_NDIV;
 
-    // log_trace("reading touch status");
-
-    ESP_ERROR_CHECK_WITHOUT_ABORT(
-      _i2c->reg_rx(LCD_I2C_DEV_ADD, i2c_reg_stat, &stat, sizeof(stat))
-    );
-    // log_trace("raw touch stat: %d", stat);
-
-    count = static_cast<std::size_t>(stat) & 0xFFul;
-    stat = 0;
-
-    if (((count & 0x80ul) > 0) && ((count & 0x0Ful) < i2c_touch_max)) {
-      ESP_ERROR_CHECK_WITHOUT_ABORT(
-        _i2c->reg_tx<0>(LCD_I2C_DEV_ADD, i2c_reg_stat)
-      );
-      count &= 0x0Ful;
-    }
-    return count;
-  }
-
-  inline esp_err_t map_touches(Touch *const pt, const std::size_t count) {
-    static constexpr std::size_t max_size = sizeof(Touch) * i2c_touch_max;
-    static std::uint8_t rx_buff[max_size];
-
-    lv_display_rotation_t rotation = lv_display_get_rotation(_driver);
-    std::int32_t width_px = lv_display_get_horizontal_resolution(_driver);
-    std::int32_t height_px = lv_display_get_vertical_resolution(_driver);
-
-    lv_memset(rx_buff, 0, max_size);
-
-    const std::size_t rx_size = std::min(max_size, static_cast<std::size_t>(sizeof(Touch)) * count);
-    esp_err_t err = _i2c->reg_rx(
-      LCD_I2C_DEV_ADD, i2c_reg_base_point, rx_buff, rx_size
-    );
-    lv_memcpy(pt, rx_buff, rx_size);
-
-    // log_trace("raw touch data: x=%d y=%d", pt->x, pt->y);
-
-    switch (rotation) {
-      case LV_DISPLAY_ROTATION_0: {
-        for (std::uint8_t i = 0; i < count; ++i) {
-          pt[i].x = width_px - pt[i].x;
-          pt[i].y = height_px - pt[i].y;
-        }
-        break;
-      }
-      case LV_DISPLAY_ROTATION_90: {
-        std::uint16_t swap;
-        for (std::uint8_t i = 0; i < count; ++i) {
-          swap = pt[i].x;
-          pt[i].x = pt[i].y;
-          pt[i].y = height_px - swap;
-        }
-        break;
-      }
-      case LV_DISPLAY_ROTATION_180: {
-        for (std::uint8_t i = 0; i < count; ++i) {
-          pt[i].x = pt[i].x;
-          pt[i].y = pt[i].y;
-        }
-        break;
-      }
-      case LV_DISPLAY_ROTATION_270: {
-        std::uint16_t swap;
-        for (std::uint8_t i = 0; i < count; ++i) {
-          swap = pt[i].x;
-          pt[i].x = width_px - pt[i].y;
-          pt[i].y = swap;
-        }
-        break;
-      }
-    }
-
-    // log_trace("mapped touch data: x=%d y=%d", pt->x, pt->y);
-
-    return err;
-  }
-
-public:
-  // Set the backlight level in the range [0=OFF, 255=MAX].
-  inline esp_err_t set_backlight(const PWM::level_t level) {
-    return _backlight->set(level);
-  }
-
-  // Set the backlight level as a ratio in the range [0.0=OFF, 1.0=MAX].
-  inline esp_err_t set_backlight(const float ratio) {
-    return _backlight->set(ratio);
-  }
-
-  inline lv_display_t *display() { return _driver; }
+  // Parameters for the GT911 touch controller.
+  static constexpr std::uint16_t _i2c_reg_prod_id = 0x8140;
+  static constexpr std::size_t _i2c_size_prod_id = 4U;
+  static constexpr std::uint16_t _i2c_reg_stat = 0x814E; // buffer/track status
+  static constexpr std::uint16_t _i2c_reg_base_point = 0x814F;
+  static constexpr std::size_t _i2c_touch_max = 5U; // simultaneous touches
 
 protected:
   // TIM *_tim;
