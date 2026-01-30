@@ -62,7 +62,7 @@ void loop() {
 #if (LV_USE_LOG)
 template<> const bsp::tpc_type::log_type bsp::tpc_type::log =
   [](lv_log_level_t ll, const char *msg) {
-    static const char *pre[_LV_LOG_LEVEL_NUM] = {
+    static const char *pre[LV_LOG_LEVEL_NUM] = {
       "[-] ", // [0] LV_LOG_LEVEL_TRACE
       "[=] ", // [1] LV_LOG_LEVEL_INFO
       "[~] ", // [2] LV_LOG_LEVEL_WARN
